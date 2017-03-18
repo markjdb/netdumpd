@@ -1,0 +1,92 @@
+.\" Copyright (c) 2011 Sandvine Incorporated. All rights reserved.
+.\" Copyright (c) 2016 Dell EMC
+.\"
+.\" Redistribution and use in source and binary forms, with or without
+.\" modification, are permitted provided that the following conditions
+.\" are met:
+.\" 1. Redistributions of source code must retain the above copyright
+.\"    notice, this list of conditions and the following disclaimer.
+.\" 2. Redistributions in binary form must reproduce the above copyright
+.\"    notice, this list of conditions and the following disclaimer in the
+.\"    documentation and/or other materials provided with the distribution.
+.\"
+.\" THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+.\" ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+.\" IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+.\" ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+.\" FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+.\" DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+.\" OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+.\" HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+.\" LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+.\" OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+.\" SUCH DAMAGE.
+.\"
+.\" $FreeBSD$
+.\"
+.Dd August 26, 2016
+.Dt NETDUMPD 8
+.Os
+.Sh NAME
+.Nm netdumpd
+.Nd receive kernel core dumps over the network
+.Sh SYNOPSIS
+.Nm
+.Op Fl a Ar addr
+.Op Fl b Ar prescript
+.Op Fl D
+.Op Fl d Ar dumpdir
+.Op Fl i Ar postscript
+.Sh DESCRIPTION
+The
+.Nm
+utility listens on a UDP socket for incoming connections from a
+.Fx
+kernel core dumping over the network.
+.Pp
+The following options are available:
+.Bl -tag -width indent
+.It Fl a
+Bind the daemon to the given address
+.Dq Pa addr .
+.It Fl b
+Execute the script
+.Dq Pa script
+as soon as a dump begins.
+The script accepts the following strings as parameters: its name, reasons for
+invocation, the client address, the client hostname, the info file name and the
+core dump file name.
+.It Fl D
+Run the utility in debugging mode.
+The daemon version is not entered while the output is printed entirely on the
+console.
+.It Fl d
+Save the core dumps to the specified
+.Dq Pa dumpdir
+directory.
+The default directory is
+.Pa /var/crash .
+.It Fl i
+Execute the script
+.Dq Pa script
+after each dump received.
+The script receives the same parameters as the
+.Fl b
+.Pa prescript .
+.El
+.Sh SECURITY
+The
+.Nm
+utility does not perform any authentication of clients and should therefore
+be configured to listen only to trusted networks.
+.Nm
+can be made to write an arbitrary amount of client data to a locally-mounted
+filesystem.
+.Sh SEE ALSO
+.Xr netdump 4 ,
+.Xr dumpon 8
+.Sh HISTORY
+The
+.Nm
+utility appeared in
+.Fx 12.0 .

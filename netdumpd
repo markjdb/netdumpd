@@ -1,0 +1,19 @@
+#!/bin/sh
+#
+# $FreeBSD$
+#
+
+# PROVIDE: netdumpd
+# REQUIRE: NETWORKING
+# KEYWORD: shutdown
+
+. /etc/rc.subr
+
+name="netdumpd"
+rcvar="netdumpd_enable"
+rcflags="${netdumpd_flags}"
+pidfile="/var/run/${name}.pid"
+command="/usr/sbin/${name}"
+
+load_rc_config $name
+run_rc_command "$1"
