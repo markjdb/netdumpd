@@ -868,15 +868,95 @@ get_script_option(void)
 	return (script);
 }
 
+static int
+init_kqueue(void)
+{
+	struct sigaction sa;
+	struct kevent sockev, sigev[2];
+	sigset_t set;
+
+	g_kq = kqueue();
+	if (g_kq < 0) {
+		LOGERR_PERROR("kqueue()");
+		return (1);
+	}
+
+	EV_SET(&sockev, g_sock, EVFILT_READ, EV_ADD, 0, 0, NULL);
+	if (kevent(g_kq, &sockev, 1, NULL, 0, NULL) != 0) {
+		LOGERR_PERROR("kevent(socket)");
+		return (1);
+	}
+
+	/* Mask all signals. We watch for SIGINT and SIGTERM only. */
+	sigfillset(&set);
+	if (sigprocmask(SIG_BLOCK, &set, NULL) != 0) {
+		LOGERR_PERROR("sigprocmask()");
+		return (1);
+	}
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = SIG_IGN;
+	sa.sa_flags = SA_NOCLDWAIT;
+	if (sigaction(SIGCHLD, &sa, NULL)) {
+		LOGERR_PERROR("sigaction(SIGCHLD)");
+		return (1);
+	}
+
+	EV_SET(&sigev[0], SIGINT, EVFILT_SIGNAL, EV_ADD, 0, 0, NULL);
+	EV_SET(&sigev[1], SIGTERM, EVFILT_SIGNAL, EV_ADD, 0, 0, NULL);
+	if (kevent(g_kq, sigev, nitems(sigev), NULL, 0, NULL) != 0) {
+		LOGERR_PERROR("kevent(signals)");
+		return (1);
+	}
+	return (0);
+}
+
+static int
+init_server_socket(void)
+{
+	struct sockaddr_in bindaddr;
+	int one;
+
+	if (g_bindip.s_addr == INADDR_ANY)
+		warnx("default: listening on all interfaces");
+	g_sock = socket(PF_INET, SOCK_DGRAM | SOCK_CLOEXEC, IPPROTO_UDP);
+	if (g_sock == -1) {
+		LOGERR_PERROR("socket()");
+		return (1);
+	}
+
+	/*
+	 * When a client initiates a netdump, we must ensure that we respond
+	 * using the source address expected by the client. We thus configure
+	 * IP_RECVDSTADDR so that we may bind+connect using the provided
+	 * address.
+	 */
+	one = 1;
+	if (setsockopt(g_sock, IPPROTO_IP, IP_RECVDSTADDR, &one,
+	    sizeof(one)) != 0) {
+		LOGERR_PERROR("setsockopt()");
+		return (1);
+	}
+	memset(&bindaddr, 0, sizeof(bindaddr));
+	bindaddr.sin_len = sizeof(bindaddr);
+	bindaddr.sin_family = AF_INET;
+	bindaddr.sin_addr.s_addr = g_bindip.s_addr;
+	bindaddr.sin_port = htons(NETDUMP_PORT);
+	if (bind(g_sock, (struct sockaddr *)&bindaddr, sizeof(bindaddr))) {
+		LOGERR_PERROR("bind()");
+		return (1);
+	}
+	if (fcntl(g_sock, F_SETFL, O_NONBLOCK) == -1) {
+		LOGERR_PERROR("fcntl()");
+		return (1);
+	}
+	return (0);
+}
+
 int
 main(int argc, char **argv)
 {
 	struct stat statbuf;
-	struct sockaddr_in bindaddr;
-	struct sigaction sa;
-	struct kevent sockev, sigev[2];
-	sigset_t set;
-	int ch, exit_code, one;
+	int ch, exit_code;
 
 	g_bindip.s_addr = INADDR_ANY;
 
@@ -931,12 +1011,11 @@ main(int argc, char **argv)
 			err(1, "pidfile_open");
 	}
 
-	if (g_bindip.s_addr == INADDR_ANY)
-		warnx("default: listening on all interfaces");
 	if (g_dumpdir[0] == '\0') {
 		strcpy(g_dumpdir, "/var/crash");
 		warnx("default: dumping to /var/crash/");
 	}
+
 	if (g_debug)
 		g_phook = phook_printf;
 	else
@@ -965,65 +1044,11 @@ main(int argc, char **argv)
 		goto cleanup;
 	}
 
-	g_kq = kqueue();
-	if (g_kq < 0) {
-		LOGERR_PERROR("kqueue()");
+	if (init_server_socket())
 		goto cleanup;
-	}
 
-	/* Set up the server socket. */
-	g_sock = socket(PF_INET, SOCK_DGRAM | SOCK_CLOEXEC, IPPROTO_UDP);
-	if (g_sock == -1) {
-		LOGERR_PERROR("socket()");
+	if (init_kqueue())
 		goto cleanup;
-	}
-	one = 1;
-	if (setsockopt(g_sock, IPPROTO_IP, IP_RECVDSTADDR, &one,
-	    sizeof(one)) != 0) {
-		LOGERR_PERROR("setsockopt()");
-		goto cleanup;
-	}
-	bzero(&bindaddr, sizeof(bindaddr));
-	bindaddr.sin_len = sizeof(bindaddr);
-	bindaddr.sin_family = AF_INET;
-	bindaddr.sin_addr.s_addr = g_bindip.s_addr;
-	bindaddr.sin_port = htons(NETDUMP_PORT);
-	if (bind(g_sock, (struct sockaddr *)&bindaddr, sizeof(bindaddr))) {
-		LOGERR_PERROR("bind()");
-		goto cleanup;
-	}
-	if (fcntl(g_sock, F_SETFL, O_NONBLOCK) == -1) {
-		LOGERR_PERROR("fcntl()");
-		goto cleanup;
-	}
-
-	EV_SET(&sockev, g_sock, EVFILT_READ, EV_ADD, 0, 0, NULL);
-	if (kevent(g_kq, &sockev, 1, NULL, 0, NULL) != 0) {
-		LOGERR_PERROR("kevent(socket)");
-		goto cleanup;
-	}
-
-	/* Mask all signals. */
-	sigfillset(&set);
-	if (sigprocmask(SIG_BLOCK, &set, NULL) != 0) {
-		LOGERR_PERROR("sigprocmask()");
-		goto cleanup;
-	}
-	bzero(&sa, sizeof(sa));
-	sa.sa_handler = SIG_IGN;
-	sa.sa_flags = SA_NOCLDWAIT;
-	if (sigaction(SIGCHLD, &sa, NULL)) {
-		LOGERR_PERROR("sigaction(SIGCHLD)");
-		goto cleanup;
-	}
-
-	/* Watch for SIGINT and SIGTERM. */
-	EV_SET(&sigev[0], SIGINT, EVFILT_SIGNAL, EV_ADD, 0, 0, NULL);
-	EV_SET(&sigev[1], SIGTERM, EVFILT_SIGNAL, EV_ADD, 0, 0, NULL);
-	if (kevent(g_kq, sigev, nitems(sigev), NULL, 0, NULL) != 0) {
-		LOGERR_PERROR("kevent(signals)");
-		goto cleanup;
-	}
 
 	LOGINFO("Waiting for clients.\n");
 	exit_code = eventloop();
