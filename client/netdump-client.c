@@ -34,6 +34,7 @@
 
 #include <err.h>
 #include <fcntl.h>
+#include <netdb.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -72,6 +73,7 @@ int
 main(int argc, char **argv)
 {
 	char buf[BUFSIZ];
+	struct addrinfo hints, *res;
 	struct msghdr msg;
 	struct netdump_ack ack;
 	struct netdump_msg_hdr ndmsg, *ndmsgp;
@@ -80,7 +82,7 @@ main(int argc, char **argv)
 	char *addr;
 	ssize_t off, r;
 	uint32_t seqno;
-	int ch, fd, sd;
+	int ch, error, fd, sd;
 
 	addr = NULL;
 	while ((ch = getopt(argc, argv, "c:")) != -1) {
@@ -100,6 +102,14 @@ main(int argc, char **argv)
 
 	if (addr == NULL)
 		addr = strdup("127.0.0.1");
+	memset(&hints, 0, sizeof(hints));
+	hints.ai_family = AF_INET;
+	hints.ai_socktype = SOCK_DGRAM;
+	error = getaddrinfo(addr, NULL, &hints, &res);
+	if (error != 0)
+		errx(1, "%s", gai_strerror(error));
+	if (res == NULL || res->ai_addr->sa_family != AF_INET)
+		errx(1, "failed to look up '%s'", addr);
 
 	fd = open(argv[0], O_RDONLY);
 	if (fd < 0)
@@ -122,7 +132,8 @@ main(int argc, char **argv)
 		err(1, "bind");
 
 	sin.sin_port = htons(NETDUMP_PORT);
-	sin.sin_addr.s_addr = inet_addr(addr);
+	sin.sin_addr.s_addr =
+	    ((struct sockaddr_in *)(void *)res->ai_addr)->sin_addr.s_addr;
 	if (sin.sin_addr.s_addr == INADDR_NONE)
 		errx(1, "invalid address '%s'", addr);
 
