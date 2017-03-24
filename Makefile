@@ -14,4 +14,6 @@ LDADD+=	-lutil
 # Only for external build.
 CFLAGS+= -I${.CURDIR}/.
 
+WARNS?=	6
+
 .include <bsd.prog.mk>
