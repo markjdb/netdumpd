@@ -41,7 +41,7 @@ __FBSDID("$FreeBSD$");
 #include <net/if.h>
 #include <netinet/in.h>
 
-#include "netinet/netdump/netdump.h" /* XXX */
+#include <netinet/netdump/netdump.h>
 
 #include <assert.h>
 #include <err.h>

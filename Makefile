@@ -12,6 +12,6 @@ FILESMODE= 0555
 LDADD+=	-lutil
 
 # Only for external build.
-CFLAGS+= -I.
+CFLAGS+= -I${.CURDIR}/.
 
 .include <bsd.prog.mk>
