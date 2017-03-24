@@ -166,6 +166,7 @@ main(int argc, char **argv)
 
 	(void)close(fd);
 	(void)close(sd);
+	free(msg.msg_iov);
 	free(addr);
 
 	return (0);
