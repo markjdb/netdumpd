@@ -165,7 +165,7 @@ usage(const char *cmd)
 {
 
 	warnx(
-    "usage: %s [-D] [-a bind_addr] [-d dumpdir] [-i script] [-b script]",
+"usage: %s [-D] [-a bind_addr] [-d dumpdir] [-i script] [-b script] [-P pidfile]",
 	    cmd);
 }
 
@@ -955,13 +955,15 @@ init_server_socket(void)
 int
 main(int argc, char **argv)
 {
+	char pidfile[MAXPATHLEN];
 	struct stat statbuf;
 	int ch, exit_code;
 
 	g_bindip.s_addr = INADDR_ANY;
 
 	exit_code = 0;
-	while ((ch = getopt(argc, argv, "a:b:Dd:i:")) != -1) {
+	pidfile[0] = '\0';
+	while ((ch = getopt(argc, argv, "a:b:Dd:i:P:")) != -1) {
 		switch (ch) {
 		case 'a':
 			if (inet_aton(optarg, &g_bindip) == 0) {
@@ -996,6 +998,14 @@ main(int argc, char **argv)
 				goto cleanup;
 			}
 			break;
+		case 'P':
+			if (strlcpy(pidfile, optarg, sizeof(pidfile)) >=
+			    sizeof(pidfile)) {
+				warnx("pidfile '%s' is too long", optarg);
+				exit_code = 1;
+				goto cleanup;
+			}
+			break;
 		default:
 			usage(argv[0]);
 			exit_code = 1;
@@ -1003,7 +1013,7 @@ main(int argc, char **argv)
 		}
 	}
 
-	g_pfh = pidfile_open(NULL, 0600, NULL);
+	g_pfh = pidfile_open(pidfile[0] != '\0' ? pidfile : NULL, 0600, NULL);
 	if (g_pfh == NULL) {
 		if (errno == EEXIST)
 			errx(1, "netdumpd is already running");
