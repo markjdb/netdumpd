@@ -61,12 +61,16 @@ sendndmsg(int sd, const struct sockaddr_in *sin,
 }
 
 static void
-waitack(int sd)
+waitack(int sd, uint32_t seqno)
 {
 	struct netdump_ack ack;
+	uint32_t got;
 
 	if (recv(sd, &ack, sizeof(ack), 0) != sizeof(ack))
 		err(1, "recv");
+	got = ntohl(ack.na_seqno);
+	if (got != seqno)
+		warnx("unexpected seqno %u, wanted %u", got, seqno);
 }
 
 int
@@ -166,14 +170,14 @@ main(int argc, char **argv)
 		ndmsgp->mh_offset = htobe64(off);
 		ndmsgp->mh_len = htonl((uint32_t)r);
 		sendndmsg(sd, &sin, ndmsgp);
-		waitack(sd);
+		waitack(sd, seqno);
 	}
 
 	/* All done. */
 	memset(&ndmsg, 0, sizeof(ndmsg));
 	ndmsg.mh_type = htonl(NETDUMP_FINISHED);
 	sendndmsg(sd, &sin, &ndmsg);
-	waitack(sd);
+	waitack(sd, 0);
 
 	(void)close(fd);
 	(void)close(sd);
