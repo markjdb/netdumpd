@@ -133,8 +133,7 @@ static bool g_debug = false;
 /* Daemon print functions hook. */
 static void (*g_phook)(int, const char *, ...);
 
-static struct netdump_client *alloc_client(struct sockaddr_in *sin,
-		    struct in_addr *dip);
+static struct netdump_client *alloc_client(struct netdump_msg *msg);
 static int	eventloop(void);
 static void	exec_handler(struct netdump_client *client, const char *reason);
 static void	free_client(struct netdump_client *client);
@@ -183,22 +182,37 @@ phook_printf(int priority, const char *message, ...)
 }
 
 static struct netdump_client *
-alloc_client(struct sockaddr_in *sin, struct in_addr *dip)
+alloc_client(struct netdump_msg *msg)
 {
 	struct kevent event;
-	struct sockaddr_in saddr;
+	struct sockaddr_in saddr, *sin;
 	struct netdump_client *client;
-	struct in_addr *sip;
+	struct in_addr *dip, *sip;
+	const char *path;
 	char *firstdot;
+	uint32_t pathsz;
 	int i, ecode, fd, bufsz;
+
+	assert(msg->nm_pkt.hdr.mh_type == NETDUMP_HERALD);
 
 	client = calloc(1, sizeof(*client));
 	if (client == NULL) {
 		LOGERR_PERROR("calloc()");
 		goto error_out;
 	}
+
+	sin = msg->nm_src;
+	dip = msg->nm_dst;
 	sip = &sin->sin_addr;
 	bcopy(sip, &client->ip, sizeof(*sip));
+
+	pathsz = msg->nm_pkt.hdr.mh_len;
+	if (pathsz > 0 && pathsz < MIN(MAXPATHLEN, NETDUMP_DATASIZE) &&
+	    msg->nm_pkt.data[pathsz - 1] == '\0')
+		path = msg->nm_pkt.data;
+	else
+		path = "";
+
 	client->corefd = -1;
 	client->sock = -1;
 	client->last_msg = g_now;
@@ -255,9 +269,9 @@ alloc_client(struct sockaddr_in *sin, struct in_addr *dip)
 	/* Try info.host.0 through info.host.255 in sequence. */
 	for (i = 0; i < MAX_DUMPS; i++) {
 		snprintf(client->infofilename, sizeof(client->infofilename),
-		    "%s/info.%s.%d", g_dumpdir, client->hostname, i);
+		    "%s/%s/info.%s.%d", g_dumpdir, path, client->hostname, i);
 		snprintf(client->corefilename, sizeof(client->corefilename),
-		    "%s/vmcore.%s.%d", g_dumpdir, client->hostname, i);
+		    "%s/%s/vmcore.%s.%d", g_dumpdir, path, client->hostname, i);
 
 		/* Try the info file first. */
 		fd = open(client->infofilename, O_WRONLY | O_CREAT | O_EXCL,
@@ -464,7 +478,7 @@ handle_herald(struct netdump_client *client, struct netdump_msg *msg)
 		handle_timeout(client);
 	}
 
-	client = alloc_client(msg->nm_src, msg->nm_dst);
+	client = alloc_client(msg);
 	if (client == NULL) {
 		LOGERR("handle_herald(): new client allocation failure\n");
 		return;
@@ -629,7 +643,6 @@ receive_message(int isock, char *fromstr, size_t fromstrlen,
 
 	len = recvmsg(isock, &msg->nm_msg, 0);
 	if (len == -1) {
-
 		/*
 		 * As long as some callers may discard the errors printing
 		 * in defined circumstances, leave them the choice and avoid
