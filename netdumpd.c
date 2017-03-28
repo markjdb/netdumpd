@@ -973,6 +973,8 @@ main(int argc, char **argv)
 	struct stat statbuf;
 	int ch, exit_code;
 
+	openlog("netdumpd", LOG_PID | LOG_NDELAY, LOG_DAEMON);
+
 	g_bindip.s_addr = INADDR_ANY;
 
 	exit_code = 0;
