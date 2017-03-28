@@ -654,6 +654,7 @@ receive_message(int isock, char *fromstr, size_t fromstrlen,
 	from = (struct sockaddr_in *)msg->nm_msg.msg_name;
 	snprintf(fromstr, fromstrlen, "%s:%hu", inet_ntoa(from->sin_addr),
 	    ntohs(from->sin_port));
+
 	if ((size_t)len < sizeof(struct netdump_msg_hdr)) {
 		LOGERR("Ignoring runt packet from %s (got %zu)\n", fromstr,
 		    (size_t)len);
@@ -666,8 +667,8 @@ receive_message(int isock, char *fromstr, size_t fromstrlen,
 	msg->nm_pkt.hdr.mh_offset = be64toh(msg->nm_pkt.hdr.mh_offset);
 	msg->nm_pkt.hdr.mh_len = ntohl(msg->nm_pkt.hdr.mh_len);
 
-	if ((size_t)len <
-	    sizeof(struct netdump_msg_hdr) + msg->nm_pkt.hdr.mh_len) {
+	if ((size_t)len - sizeof(struct netdump_msg_hdr) !=
+	    msg->nm_pkt.hdr.mh_len) {
 		LOGERR("Packet too small from %s (got %zu, expected %zu)\n",
 		    fromstr, (size_t)len,
 		    sizeof(struct netdump_msg_hdr) + msg->nm_pkt.hdr.mh_len);
