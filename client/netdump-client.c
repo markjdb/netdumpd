@@ -44,7 +44,8 @@ static void
 usage(void)
 {
 
-	fprintf(stderr, "usage: %s [-c <addr>] <file>\n", getprogname());
+	fprintf(stderr, "usage: %s [-c <addr>] [-p <path>] <file>\n",
+	    getprogname());
 	exit(1);
 }
 
@@ -83,16 +84,20 @@ main(int argc, char **argv)
 	struct netdump_msg_hdr ndmsg, *ndmsgp;
 	struct sockaddr_in sin;
 	struct stat sb;
-	char *addr;
+	char *addr, *path;
 	ssize_t off, r;
+	size_t pathsz;
 	uint32_t seqno;
 	int ch, error, fd, sd;
 
-	addr = NULL;
-	while ((ch = getopt(argc, argv, "c:")) != -1) {
+	addr = path = NULL;
+	while ((ch = getopt(argc, argv, "c:p:")) != -1) {
 		switch (ch) {
 		case 'c':
 			addr = strdup(optarg);
+			break;
+		case 'p':
+			path = strdup(optarg);
 			break;
 		default:
 			usage();
@@ -141,9 +146,16 @@ main(int argc, char **argv)
 	if (sin.sin_addr.s_addr == INADDR_NONE)
 		errx(1, "invalid address '%s'", addr);
 
-	memset(&ndmsg, 0, sizeof(ndmsg));
-	ndmsg.mh_type = htonl(NETDUMP_HERALD);
-	sendndmsg(sd, &sin, &ndmsg);
+	pathsz = (path != NULL ? strlen(path) + 1 : 0);
+	ndmsgp = malloc(sizeof(*ndmsgp) + pathsz);
+	if (ndmsgp == NULL)
+		err(1, "malloc");
+	memset(ndmsgp, 0, sizeof(*ndmsgp));
+	ndmsgp->mh_type = htonl(NETDUMP_HERALD);
+	ndmsgp->mh_len = htonl((uint32_t)pathsz);
+	if (path != NULL)
+		strcpy((char *)(ndmsgp + 1), path);
+	sendndmsg(sd, &sin, ndmsgp);
 
 	/*
 	 * The server uses the first ACK to tell us which port it'll use for the
@@ -163,8 +175,8 @@ main(int argc, char **argv)
 
 	/* Now we can transfer the file. */
 	ndmsgp = (struct netdump_msg_hdr *)buf;
-	for (off = r = 0; (r = read(fd, buf + sizeof(ndmsg),
-	    sizeof(buf) - sizeof(ndmsg))) > 0; off += r) {
+	for (off = r = 0; (r = read(fd, buf + sizeof(*ndmsgp),
+	    sizeof(buf) - sizeof(*ndmsgp))) > 0; off += r) {
 		ndmsgp->mh_type = htonl(NETDUMP_VMCORE);
 		ndmsgp->mh_seqno = htonl(++seqno);
 		ndmsgp->mh_offset = htobe64(off);
@@ -181,8 +193,9 @@ main(int argc, char **argv)
 
 	(void)close(fd);
 	(void)close(sd);
-	free(msg.msg_iov);
 	free(addr);
+	free(path);
+	free(msg.msg_iov);
 
 	return (0);
 }
