@@ -98,6 +98,7 @@ struct netdump_msg {
 #define	VMCORE_BUFSZ	(128 * 1024)
 
 struct netdump_client {
+	char		dir[MAXPATHLEN];
 	char		infofilename[MAXPATHLEN];
 	char		corefilename[MAXPATHLEN];
 	char		hostname[NI_MAXHOST];
@@ -267,11 +268,13 @@ alloc_client(struct netdump_msg *msg)
 	}
 
 	/* Try info.host.0 through info.host.255 in sequence. */
+	/* XXX check snprintf returns */
+	snprintf(client->dir, sizeof(client->dir), "%s/%s", g_dumpdir, path);
 	for (i = 0; i < MAX_DUMPS; i++) {
 		snprintf(client->infofilename, sizeof(client->infofilename),
-		    "%s/%s/info.%s.%d", g_dumpdir, path, client->hostname, i);
+		    "%s/info.%s.%d", client->dir, client->hostname, i);
 		snprintf(client->corefilename, sizeof(client->corefilename),
-		    "%s/%s/vmcore.%s.%d", g_dumpdir, path, client->hostname, i);
+		    "%s/vmcore.%s.%d", client->dir, client->hostname, i);
 
 		/* Try the info file first. */
 		fd = open(client->infofilename, O_WRONLY | O_CREAT | O_EXCL,
@@ -579,20 +582,44 @@ handle_vmcore(struct netdump_client *client, struct netdump_msg *msg)
 static void
 handle_finish(struct netdump_client *client, struct netdump_msg *msg)
 {
+	char symlinkpath[MAXPATHLEN];
 
 	assert(msg != NULL);
 
 	if (client == NULL)
 		return;
+
 	/* Make sure we commit any buffered vmcore data. */
 	if (vmcore_flush(client) != 0)
 		return;
+	(void)fsync(client->corefd);
+
+	/* Create symlinks to the last vmcore and info files. */
+	snprintf(symlinkpath, sizeof(symlinkpath), "%s/vmcore.%s.last",
+	    client->dir, client->hostname);
+	if (unlink(symlinkpath) != 0 && errno != ENOENT) {
+		LOGERR_PERROR("unlink()");
+		return;
+	}
+	if (symlink(client->corefilename, symlinkpath) != 0) {
+		LOGERR_PERROR("symlink()");
+		return;
+	}
+	snprintf(symlinkpath, sizeof(symlinkpath), "%s/info.%s.last",
+	    client->dir, client->hostname);
+	if (unlink(symlinkpath) != 0 && errno != ENOENT) {
+		LOGERR_PERROR("unlink()");
+		return;
+	}
+	if (symlink(client->infofilename, symlinkpath) != 0) {
+		LOGERR_PERROR("symlink()");
+		return;
+	}
 
 	LOGINFO("\nCompleted dump from client %s [%s]\n", client->hostname,
 	    client_ntoa(client));
 	client_pinfo(client, "Dump complete\n");
 	send_ack(client, msg);
-	(void)fsync(client->corefd);
 	exec_handler(client, "success");
 	free_client(client);
 }
