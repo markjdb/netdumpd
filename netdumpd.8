@@ -1,5 +1,5 @@
 .\" Copyright (c) 2011 Sandvine Incorporated. All rights reserved.
-.\" Copyright (c) 2016 Dell EMC
+.\" Copyright (c) 2016-2017 Dell EMC
 .\"
 .\" Redistribution and use in source and binary forms, with or without
 .\" modification, are permitted provided that the following conditions
@@ -24,7 +24,7 @@
 .\"
 .\" $FreeBSD$
 .\"
-.Dd August 26, 2016
+.Dd April 12, 2017
 .Dt NETDUMPD 8
 .Os
 .Sh NAME
@@ -33,11 +33,11 @@
 .Sh SYNOPSIS
 .Nm
 .Op Fl a Ar addr
-.Op Fl b Ar prescript
 .Op Fl D
 .Op Fl d Ar dumpdir
 .Op Fl i Ar postscript
 .Op Fl P Ar pidfile
+.Op Fl p Ar path
 .Sh DESCRIPTION
 The
 .Nm
@@ -50,13 +50,6 @@ The following options are available:
 .It Fl a
 Bind the daemon to the given address
 .Dq Pa addr .
-.It Fl b
-Execute the script
-.Dq Pa script
-as soon as a dump begins.
-The script accepts the following strings as parameters: its name, reasons for
-invocation, the client address, the client hostname, the info file name and the
-core dump file name.
 .It Fl D
 Run the utility in debugging mode.
 The daemon version is not entered while the output is printed entirely on the
@@ -67,6 +60,14 @@ Save the core dumps to the specified
 directory.
 The default directory is
 .Pa /var/crash .
+.Pp
+Clients may optionally specify a relative directory path when initiating a
+netdump.
+This path is appended to
+.Dq Pa dumpdir
+to obtain a directory in which to save the core dump.
+The relative path may not contain ".." components.
+Additionally, no symbolic link in the path may contain ".." components.
 .It Fl i
 Execute the script
 .Dq Pa script
@@ -78,6 +79,12 @@ The script receives the same parameters as the
 Specify an alternative file in which to store the process ID.
 The default is
 .Pa /var/run/netdumpd.pid .
+.It Fl p
+A directory path relative to
+.Dq Pa dumpdir
+in which to save core dumps for clients that do not specify a relative path.
+Core dumps from clients that specify an invalid directory path are saved in the
+default directory.
 .El
 .Sh SECURITY
 The

@@ -28,10 +28,12 @@
 __FBSDID("$FreeBSD$");
 
 #include <sys/param.h>
+#include <sys/capsicum.h>
 #include <sys/endian.h>
 #include <sys/errno.h>
 #include <sys/event.h>
 #include <sys/kerneldump.h>
+#include <sys/nv.h>
 #include <sys/queue.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -40,16 +42,14 @@ __FBSDID("$FreeBSD$");
 #include <arpa/inet.h>
 #include <net/if.h>
 #include <netinet/in.h>
-
 #include <netinet/netdump/netdump.h>
 
 #include <assert.h>
 #include <err.h>
 #include <fcntl.h>
-#include <inttypes.h>
+#include <libgen.h>
 #include <netdb.h>
 #include <signal.h>
-#include <spawn.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -58,7 +58,13 @@ __FBSDID("$FreeBSD$");
 #include <syslog.h>
 #include <unistd.h>
 
+#include <capsicum_helpers.h>
+#include <libcasper.h>
+#include <casper/cap_dns.h>
+
 #include <libutil.h>
+
+#include "netdumpd.h"
 
 #define	MAX_DUMPS	256	/* Maximum saved dumps per remote host. */
 #define	CLIENT_TIMEOUT	600	/* Netdump timeout period, in seconds. */
@@ -83,22 +89,10 @@ struct netdump_pkt {
 	uint8_t		data[NETDUMP_DATASIZE];
 } __packed;
 
-struct netdump_msg {
-	struct msghdr	nm_msg;		/* recvmsg(2) header */
-
-	struct sockaddr_in *nm_src;	/* src addr */
-	struct sockaddr_storage nm_ss;	/* src addr storage */
-	struct in_addr	*nm_dst;	/* dst IP */
-	struct cmsghdr	*nm_cmsg;	/* control msg for dst IP */
-
-	struct iovec	nm_iov;		/* packet iovec */
-	struct netdump_pkt nm_pkt;	/* packet contents */
-};
-
 #define	VMCORE_BUFSZ	(128 * 1024)
 
 struct netdump_client {
-	char		dir[MAXPATHLEN];
+	char		*path;
 	char		infofilename[MAXPATHLEN];
 	char		corefilename[MAXPATHLEN];
 	char		hostname[NI_MAXHOST];
@@ -117,10 +111,14 @@ struct netdump_client {
 /* Clients list. */
 static LIST_HEAD(, netdump_client) g_clients = LIST_HEAD_INITIALIZER(g_clients);
 
+/* Capabilities. */
+static cap_channel_t *g_capdns, *g_caphandler, *g_capherald;
+
 /* Program arguments handlers. */
 static char g_dumpdir[MAXPATHLEN];
+static int g_dumpdir_fd = -1;
+static char g_defpath[MAXPATHLEN];
 static char *g_handler_script;
-static char *g_handler_pre_script;
 static struct in_addr g_bindip;
 
 /* Miscellaneous handlers. */
@@ -134,39 +132,34 @@ static bool g_debug = false;
 /* Daemon print functions hook. */
 static void (*g_phook)(int, const char *, ...);
 
-static struct netdump_client *alloc_client(struct netdump_msg *msg);
+static struct netdump_client *alloc_client(int sd, struct sockaddr_in *saddr,
+		    char *path);
+static void	client_event(struct netdump_client *client);
 static int	eventloop(void);
 static void	exec_handler(struct netdump_client *client, const char *reason);
 static void	free_client(struct netdump_client *client);
 static void	handle_finish(struct netdump_client *client,
-		    struct netdump_msg *msg);
-static void	handle_herald(struct netdump_client *client,
-		    struct netdump_msg *msg);
+		    struct netdump_pkt *pkt);
 static void	handle_kdh(struct netdump_client *client,
-		    struct netdump_msg *msg);
-static bool	handle_packet(struct netdump_client *client,
-		    const char *fromstr, struct netdump_msg *msg);
+		    struct netdump_pkt *pkt);
 static void	handle_timeout(struct netdump_client *client);
 static void	handle_vmcore(struct netdump_client *client,
-		    struct netdump_msg *msg);
-static int	init_recvmsg(struct netdump_msg *msg);
-static void	fini_recvmsg(struct netdump_msg *msg);
+		    struct netdump_pkt *pkt);
 static void	phook_printf(int priority, const char *message, ...)
 		    __printflike(2, 3);
-static ssize_t	receive_message(int isock, char *fromstr, size_t fromstrlen,
-		    struct netdump_msg *msg);
-static void	send_ack(struct netdump_client *client,
-		    struct netdump_msg *msg);
+static void	send_ack(struct netdump_client *client, uint32_t seqno);
+static void	server_event(void);
 static void	timeout_clients(void);
-static void	usage(const char *cmd);
+static void	usage(char *cmd);
 
 static void
-usage(const char *cmd)
+usage(char *cmd)
 {
 
-	warnx(
-"usage: %s [-D] [-a bind_addr] [-d dumpdir] [-i script] [-b script] [-P pidfile]",
-	    cmd);
+	fprintf(stderr,
+"usage: %s [-D] [-a bind_addr] [-d dumpdir] [-i script] [-b script]\n"
+"\t\t[-P pidfile] [-p default path]\n",
+	    basename(cmd));
 }
 
 static void
@@ -175,26 +168,21 @@ phook_printf(int priority, const char *message, ...)
 	va_list ap;
 
 	va_start(ap, message);
-	if ((priority & LOG_INFO) != 0) {
+	if ((priority & LOG_INFO) != 0)
 		vprintf(message, ap);
-	} else
+	else
 		vfprintf(stderr, message, ap);
 	va_end(ap);
 }
 
 static struct netdump_client *
-alloc_client(struct netdump_msg *msg)
+alloc_client(int sd, struct sockaddr_in *saddr, char *path)
 {
 	struct kevent event;
-	struct sockaddr_in saddr, *sin;
 	struct netdump_client *client;
-	struct in_addr *dip, *sip;
-	const char *path;
 	char *firstdot;
-	uint32_t pathsz;
-	int i, ecode, fd, bufsz;
-
-	assert(msg->nm_pkt.hdr.mh_type == NETDUMP_HERALD);
+	size_t len;
+	int i, error, fd, bufsz;
 
 	client = calloc(1, sizeof(*client));
 	if (client == NULL) {
@@ -202,30 +190,21 @@ alloc_client(struct netdump_msg *msg)
 		goto error_out;
 	}
 
-	sin = msg->nm_src;
-	dip = msg->nm_dst;
-	sip = &sin->sin_addr;
-	bcopy(sip, &client->ip, sizeof(*sip));
-
-	pathsz = msg->nm_pkt.hdr.mh_len;
-	if (pathsz > 0 && pathsz < MIN(MAXPATHLEN, NETDUMP_DATASIZE) &&
-	    msg->nm_pkt.data[pathsz - 1] == '\0')
-		path = msg->nm_pkt.data;
-	else
-		path = "";
-
 	client->corefd = -1;
-	client->sock = -1;
+	client->sock = sd;
 	client->last_msg = g_now;
+	client->ip = saddr->sin_addr;
 
-	ecode = getnameinfo((struct sockaddr *)sin, sin->sin_len,
-	    client->hostname, sizeof(client->hostname), NULL, 0, NI_NAMEREQD);
-	if (ecode != 0) {
+	error = cap_getnameinfo(g_capdns, (struct sockaddr *)saddr,
+	    saddr->sin_len, client->hostname, sizeof(client->hostname),
+	    NULL, 0, NI_NAMEREQD);
+	if (error != 0) {
 		/* Can't resolve, try with a numeric IP. */
-		ecode = getnameinfo((struct sockaddr *)sin, sin->sin_len,
-		    client->hostname, sizeof(client->hostname), NULL, 0, 0);
-		if (ecode != 0) {
-			LOGERR("getnameinfo(): %s\n", gai_strerror(ecode));
+		error = cap_getnameinfo(g_capdns, (struct sockaddr *)saddr,
+		    saddr->sin_len, client->hostname, sizeof(client->hostname),
+		    NULL, 0, 0);
+		if (error != 0) {
+			LOGERR("cap_getnameinfo(): %s\n", gai_strerror(error));
 			goto error_out;
 		}
 	} else {
@@ -233,28 +212,6 @@ alloc_client(struct netdump_msg *msg)
 		firstdot = strchr(client->hostname, '.');
 		if (firstdot)
 			*firstdot = '\0';
-	}
-
-	client->sock = socket(PF_INET,
-	    SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, IPPROTO_UDP);
-	if (client->sock == -1) {
-		LOGERR_PERROR("socket()");
-		goto error_out;
-	}
-	bzero(&saddr, sizeof(saddr));
-	saddr.sin_len = sizeof(saddr);
-	saddr.sin_family = AF_INET;
-	saddr.sin_addr.s_addr = dip->s_addr;
-	saddr.sin_port = htons(0);
-	if (bind(client->sock, (struct sockaddr *)&saddr, sizeof(saddr))) {
-		LOGERR_PERROR("bind()");
-		goto error_out;
-	}
-	saddr.sin_addr.s_addr = sip->s_addr;
-	saddr.sin_port = htons(NETDUMP_ACKPORT);
-	if (connect(client->sock, (struct sockaddr *)&saddr, sizeof(saddr))) {
-		LOGERR_PERROR("connect()");
-		goto error_out;
 	}
 
 	/* It should be enough to hold approximatively twice the chunk size. */
@@ -267,42 +224,62 @@ alloc_client(struct netdump_msg *msg)
 		    client->hostname);
 	}
 
-	/* Try info.host.0 through info.host.255 in sequence. */
-	/* XXX check snprintf returns */
-	snprintf(client->dir, sizeof(client->dir), "%s/%s", g_dumpdir, path);
+retry:
+	if (path == NULL)
+		client->path = strdup(g_defpath);
+	else
+		client->path = path;
+
+	/*
+	 * Try info.host.0 through info.host.255 in sequence. First try to
+	 * create files in the directory specified by the client, if any. If
+	 * that fails, we'll fall back to the default path.
+	 */
 	for (i = 0; i < MAX_DUMPS; i++) {
-		snprintf(client->infofilename, sizeof(client->infofilename),
-		    "%s/info.%s.%d", client->dir, client->hostname, i);
-		snprintf(client->corefilename, sizeof(client->corefilename),
-		    "%s/vmcore.%s.%d", client->dir, client->hostname, i);
+		len = snprintf(client->infofilename,
+		    sizeof(client->infofilename),
+		    "%s/info.%s.%d", client->path, client->hostname, i);
+		if (len >= sizeof(client->infofilename)) {
+			LOGERR("Truncated info file path: '%s'\n",
+			    client->infofilename);
+			break;
+		}
+		len = snprintf(client->corefilename,
+		    sizeof(client->corefilename),
+		    "%s/vmcore.%s.%d", client->path, client->hostname, i);
+		if (len >= sizeof(client->corefilename)) {
+			LOGERR("Truncated core file path: '%s'\n",
+			    client->corefilename);
+			break;
+		}
 
 		/* Try the info file first. */
-		fd = open(client->infofilename, O_WRONLY | O_CREAT | O_EXCL,
-		    0600);
+		fd = openat(g_dumpdir_fd, client->infofilename,
+		    O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
 		if (fd == -1) {
 			if (errno != EEXIST)
-				LOGERR("open(\"%s\"): %s\n",
+				LOGERR("openat(\"%s\"): %s\n",
 				    client->infofilename, strerror(errno));
 			continue;
 		}
-		client->infofile = fdopen(fd, "w");
+		client->infofile = fdopen(fd, "a");
 		if (client->infofile == NULL) {
 			LOGERR_PERROR("fdopen()");
-			close(fd);
-			(void)unlink(client->infofilename);
+			(void)close(fd);
+			(void)unlinkat(g_dumpdir_fd, client->infofilename, 0);
 			continue;
 		}
 
 		/* Next make the core file. */
-		fd = open(client->corefilename, O_RDWR | O_CREAT | O_EXCL,
-		    0600);
+		fd = openat(g_dumpdir_fd, client->corefilename,
+		    O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
 		if (fd == -1) {
 			/* Failed. Keep the numbers in sync. */
-			fclose(client->infofile);
-			(void)unlink(client->infofilename);
+			(void)fclose(client->infofile);
+			(void)unlinkat(g_dumpdir_fd, client->infofilename, 0);
 			client->infofile = NULL;
 			if (errno != EEXIST)
-				LOGERR("open(\"%s\"): %s\n",
+				LOGERR("openat(\"%s\"): %s\n",
 				    client->corefilename, strerror(errno));
 			continue;
 		}
@@ -311,12 +288,20 @@ alloc_client(struct netdump_msg *msg)
 	}
 
 	if (client->infofile == NULL || client->corefd == -1) {
+		if (path != NULL) {
+			LOGWARN(
+    "Can't create output files in path for client %s, retrying with default\n",
+			    client->hostname);
+			free(path);
+			path = NULL;
+			goto retry;
+		}
 		LOGERR("Can't create output files for new client %s [%s]\n",
 		    client->hostname, client_ntoa(client));
 		goto error_out;
 	}
 
-	EV_SET(&event, client->sock, EVFILT_READ, EV_ADD, 0, 0, NULL);
+	EV_SET(&event, client->sock, EVFILT_READ, EV_ADD, 0, 0, client);
 	if (kevent(g_kq, &event, 1, NULL, 0, NULL) != 0) {
 		LOGERR_PERROR("kevent(EV_ADD)");
 		goto error_out;
@@ -328,9 +313,9 @@ alloc_client(struct netdump_msg *msg)
 error_out:
 	if (client != NULL) {
 		if (client->infofile != NULL)
-			fclose(client->infofile);
+			(void)fclose(client->infofile);
 		if (client->corefd != -1)
-			close(client->corefd);
+			(void)close(client->corefd);
 		if (client->sock != -1)
 			(void)close(client->sock);
 		free(client);
@@ -352,45 +337,21 @@ free_client(struct netdump_client *client)
 	fclose(client->infofile);
 	close(client->corefd);
 	close(client->sock);
+	free(client->path);
 	free(client);
-}
-
-static void
-exec_script(struct netdump_client *client, const char *reason,
-    const char *script)
-{
-	const char *argv[7];
-	int error;
-	pid_t pid;
-
-	argv[0] = script;
-	argv[1] = reason;
-	argv[2] = client_ntoa(client);
-	argv[3] = client->hostname;
-	argv[4] = client->infofilename;
-	argv[5] = client->corefilename;
-	argv[6] = NULL;
-
-	error = posix_spawn(&pid, script, NULL, NULL,
-	    __DECONST(char *const *, argv), NULL);
-	if (error != 0)
-		LOGERR("posix_spawn(): %s", strerror(error));
 }
 
 static void
 exec_handler(struct netdump_client *client, const char *reason)
 {
+	int error;
 
-	if (g_handler_script != NULL)
-		exec_script(client, reason, g_handler_script);
-}
-
-static void
-exec_pre_script(struct netdump_client *client, const char *reason)
-{
-
-	if (g_handler_pre_script != NULL)
-		exec_script(client, reason, g_handler_pre_script);
+	if (g_caphandler == NULL)
+		return;
+	error = netdump_cap_handler(g_caphandler, reason, client_ntoa(client),
+	    client->hostname, client->infofilename, client->corefilename);
+	if (error != 0)
+		LOGERR("netdump_cap_handler(): %s", strerror(error));
 }
 
 static void
@@ -446,14 +407,12 @@ timeout_clients(void)
 }
 
 static void
-send_ack(struct netdump_client *client, struct netdump_msg *msg)
+send_ack(struct netdump_client *client, uint32_t seqno)
 {
 	struct netdump_ack ack;
 
-	assert(client != NULL && msg != NULL);
-
 	bzero(&ack, sizeof(ack));
-	ack.na_seqno = htonl(msg->nm_pkt.hdr.mh_seqno);
+	ack.na_seqno = htonl(seqno);
 
 	if (send(client->sock, &ack, sizeof(ack), 0) == -1)
 		LOGERR_PERROR("send()");
@@ -466,50 +425,16 @@ send_ack(struct netdump_client *client, struct netdump_msg *msg)
 }
 
 static void
-handle_herald(struct netdump_client *client, struct netdump_msg *msg)
-{
-
-	assert(msg != NULL);
-
-	if (client != NULL) {
-		if (!client->any_data_rcvd) {
-			/* Must be a retransmit of the herald packet. */
-			send_ack(client, msg);
-			return;
-		}
-		/* An old connection must have timed out. Clean it up first. */
-		handle_timeout(client);
-	}
-
-	client = alloc_client(msg);
-	if (client == NULL) {
-		LOGERR("handle_herald(): new client allocation failure\n");
-		return;
-	}
-	client_pinfo(client, "Dump from %s [%s]\n", client->hostname,
-	    client_ntoa(client));
-	LOGINFO("New dump from client %s [%s] (to %s)\n", client->hostname,
-	    client_ntoa(client), client->corefilename);
-	exec_pre_script(client, "new dump");
-	send_ack(client, msg);
-}
-
-static void
-handle_kdh(struct netdump_client *client, struct netdump_msg *msg)
+handle_kdh(struct netdump_client *client, struct netdump_pkt *pkt)
 {
 	time_t t;
 	uint64_t dumplen;
 	struct kerneldumpheader *h;
 	int parity_check;
 
-	assert(msg != NULL);
-
-	if (client == NULL)
-		return;
-
 	client->any_data_rcvd = true;
-	h = (struct kerneldumpheader *)(void *)msg->nm_pkt.data;
-	if (msg->nm_pkt.hdr.mh_len < sizeof(struct kerneldumpheader)) {
+	h = (struct kerneldumpheader *)(void *)pkt->data;
+	if (pkt->hdr.mh_len < sizeof(struct kerneldumpheader)) {
 		LOGERR("Bad KDH from %s [%s]: packet too small\n",
 		    client->hostname, client_ntoa(client));
 		client_pinfo(client, "Bad KDH: packet too small\n");
@@ -530,7 +455,7 @@ handle_kdh(struct netdump_client *client, struct netdump_msg *msg)
 	dumplen = dtoh64(h->dumplength);
 	client_pinfo(client, "  Dump length: %lldB (%lld MB)\n",
 	    (long long)dumplen, (long long)(dumplen >> 20));
-	client_pinfo(client, "  blocksize: %d\n", dtoh32(h->blocksize));
+	client_pinfo(client, "  Blocksize: %d\n", dtoh32(h->blocksize));
 	t = dtoh64(h->dumptime);
 	client_pinfo(client, "  Dumptime: %s", ctime(&t));
 	client_pinfo(client, "  Hostname: %s\n", h->hostname);
@@ -541,20 +466,15 @@ handle_kdh(struct netdump_client *client, struct netdump_msg *msg)
 	fflush(client->infofile);
 
 	LOGINFO("(KDH from %s [%s])", client->hostname, client_ntoa(client));
-	send_ack(client, msg);
+	send_ack(client, pkt->hdr.mh_seqno);
 }
 
 static void
-handle_vmcore(struct netdump_client *client, struct netdump_msg *msg)
+handle_vmcore(struct netdump_client *client, struct netdump_pkt *pkt)
 {
 
-	assert(msg != NULL);
-
-	if (client == NULL)
-		return;
-
 	client->any_data_rcvd = true;
-	if (msg->nm_pkt.hdr.mh_seqno % (16 * 1024 * 1024 / 1456) == 0) {
+	if (pkt->hdr.mh_seqno % (16 * 1024 * 1024 / 1456) == 0) {
 		/* Approximately every 16MB with MTU of 1500 */
 		LOGINFO(".");
 	}
@@ -565,53 +485,47 @@ handle_vmcore(struct netdump_client *client, struct netdump_msg *msg)
 	 */
 	if (client->vmcorebufoff + NETDUMP_DATASIZE > VMCORE_BUFSZ ||
 	    (client->vmcorebufoff > 0 &&
-	    client->vmcoreoff + client->vmcorebufoff !=
-	    msg->nm_pkt.hdr.mh_offset))
+	    client->vmcoreoff + client->vmcorebufoff != pkt->hdr.mh_offset))
 		if (vmcore_flush(client) != 0)
 			return;
 
-	memcpy(client->vmcorebuf + client->vmcorebufoff, msg->nm_pkt.data,
-	    msg->nm_pkt.hdr.mh_len);
+	memcpy(client->vmcorebuf + client->vmcorebufoff, pkt->data,
+	    pkt->hdr.mh_len);
 	if (client->vmcorebufoff == 0)
-		client->vmcoreoff = msg->nm_pkt.hdr.mh_offset;
-	client->vmcorebufoff += msg->nm_pkt.hdr.mh_len;
+		client->vmcoreoff = pkt->hdr.mh_offset;
+	client->vmcorebufoff += pkt->hdr.mh_len;
 
-	send_ack(client, msg);
+	send_ack(client, pkt->hdr.mh_seqno);
 }
 
 static void
-handle_finish(struct netdump_client *client, struct netdump_msg *msg)
+handle_finish(struct netdump_client *client, struct netdump_pkt *pkt)
 {
 	char symlinkpath[MAXPATHLEN];
-
-	assert(msg != NULL);
-
-	if (client == NULL)
-		return;
 
 	/* Make sure we commit any buffered vmcore data. */
 	if (vmcore_flush(client) != 0)
 		return;
 	(void)fsync(client->corefd);
 
-	/* Create symlinks to the last vmcore and info files. */
+	/* Create symlinks to the new vmcore and info files. */
 	snprintf(symlinkpath, sizeof(symlinkpath), "%s/vmcore.%s.last",
-	    client->dir, client->hostname);
-	if (unlink(symlinkpath) != 0 && errno != ENOENT) {
-		LOGERR_PERROR("unlink()");
+	    client->path, client->hostname);
+	if (unlinkat(g_dumpdir_fd, symlinkpath, 0) != 0 && errno != ENOENT) {
+		LOGERR_PERROR("unlinkat()");
 		return;
 	}
-	if (symlink(client->corefilename, symlinkpath) != 0) {
+	if (symlinkat(client->corefilename, g_dumpdir_fd, symlinkpath) != 0) {
 		LOGERR_PERROR("symlink()");
 		return;
 	}
 	snprintf(symlinkpath, sizeof(symlinkpath), "%s/info.%s.last",
-	    client->dir, client->hostname);
-	if (unlink(symlinkpath) != 0 && errno != ENOENT) {
-		LOGERR_PERROR("unlink()");
+	    client->path, client->hostname);
+	if (unlinkat(g_dumpdir_fd, symlinkpath, 0) != 0 && errno != ENOENT) {
+		LOGERR_PERROR("unlinkat()");
 		return;
 	}
-	if (symlink(client->infofilename, symlinkpath) != 0) {
+	if (symlinkat(client->infofilename, g_dumpdir_fd, symlinkpath) != 0) {
 		LOGERR_PERROR("symlink()");
 		return;
 	}
@@ -619,219 +533,104 @@ handle_finish(struct netdump_client *client, struct netdump_msg *msg)
 	LOGINFO("\nCompleted dump from client %s [%s]\n", client->hostname,
 	    client_ntoa(client));
 	client_pinfo(client, "Dump complete\n");
-	send_ack(client, msg);
+	send_ack(client, pkt->hdr.mh_seqno);
 	exec_handler(client, "success");
 	free_client(client);
 }
 
-static int
-init_recvmsg(struct netdump_msg *msg)
-{
-	size_t cmsgsz;
-
-	memset(&msg->nm_msg, 0, sizeof(msg->nm_msg));
-
-	msg->nm_msg.msg_name = &msg->nm_ss;
-	msg->nm_msg.msg_namelen = sizeof(msg->nm_ss);
-	msg->nm_msg.msg_iov = &msg->nm_iov;
-	msg->nm_msg.msg_iovlen = 1;
-
-	msg->nm_iov.iov_base = &msg->nm_pkt;
-	msg->nm_iov.iov_len = sizeof(msg->nm_pkt);
-
-	msg->nm_src = (struct sockaddr_in *)&msg->nm_ss;
-
-	cmsgsz = CMSG_SPACE(sizeof(struct in_addr));
-	msg->nm_cmsg = calloc(1, cmsgsz);
-	if (msg->nm_cmsg == NULL) {
-		LOGERR("malloc");
-		return (1);
-	}
-	msg->nm_msg.msg_control = msg->nm_cmsg;
-	msg->nm_msg.msg_controllen = cmsgsz;
-	return (0);
-}
-
-static void
-fini_recvmsg(struct netdump_msg *msg)
-{
-
-	free(msg->nm_cmsg);
-}
-
-static ssize_t
-receive_message(int isock, char *fromstr, size_t fromstrlen,
-    struct netdump_msg *msg)
-{
-	struct sockaddr_in *from;
-	ssize_t len;
-
-	assert(fromstr != NULL && msg != NULL);
-
-	len = recvmsg(isock, &msg->nm_msg, 0);
-	if (len == -1) {
-		/*
-		 * As long as some callers may discard the errors printing
-		 * in defined circumstances, leave them the choice and avoid
-		 * any error reporting.
-		 */
-		return (-1);
-	}
-
-	from = (struct sockaddr_in *)msg->nm_msg.msg_name;
-	snprintf(fromstr, fromstrlen, "%s:%hu", inet_ntoa(from->sin_addr),
-	    ntohs(from->sin_port));
-
-	if ((size_t)len < sizeof(struct netdump_msg_hdr)) {
-		LOGERR("Ignoring runt packet from %s (got %zu)\n", fromstr,
-		    (size_t)len);
-		return (0);
-	}
-
-	/* Convert byte order. */
-	msg->nm_pkt.hdr.mh_type = ntohl(msg->nm_pkt.hdr.mh_type);
-	msg->nm_pkt.hdr.mh_seqno = ntohl(msg->nm_pkt.hdr.mh_seqno);
-	msg->nm_pkt.hdr.mh_offset = be64toh(msg->nm_pkt.hdr.mh_offset);
-	msg->nm_pkt.hdr.mh_len = ntohl(msg->nm_pkt.hdr.mh_len);
-
-	if ((size_t)len - sizeof(struct netdump_msg_hdr) !=
-	    msg->nm_pkt.hdr.mh_len) {
-		LOGERR("Packet too small from %s (got %zu, expected %zu)\n",
-		    fromstr, (size_t)len,
-		    sizeof(struct netdump_msg_hdr) + msg->nm_pkt.hdr.mh_len);
-
-		return (0);
-	}
-	return (len);
-}
-
-static bool
-handle_packet(struct netdump_client *client, const char *fromstr,
-    struct netdump_msg *msg)
-{
-	bool finished;
-
-	assert(fromstr != NULL && msg != NULL);
-
-	if (client != NULL)
-		client->last_msg = time(NULL);
-
-	finished = false;
-	switch (msg->nm_pkt.hdr.mh_type) {
-	case NETDUMP_HERALD:
-		handle_herald(client, msg);
-		break;
-	case NETDUMP_KDH:
-		handle_kdh(client, msg);
-		break;
-	case NETDUMP_VMCORE:
-		handle_vmcore(client, msg);
-		break;
-	case NETDUMP_FINISHED:
-		handle_finish(client, msg);
-		finished = true;
-		break;
-	default:
-		LOGERR("Received unknown message type %d from %s\n",
-		    msg->nm_pkt.hdr.mh_type, fromstr);
-		break;
-	}
-	return (finished);
-}
-
 /* Handle a read event on the server socket. */
-static int
+static void
 server_event(void)
 {
-	char fromstr[INET_ADDRSTRLEN + 6];
-	struct cmsghdr *cmh;
-	struct netdump_msg msg;
+	char *path;
+	struct sockaddr_in saddr;
 	struct netdump_client *client;
-	ssize_t len;
-	int error;
+	uint32_t seqno;
+	int error, sd;
 
-	error = init_recvmsg(&msg);
-	if (error != 0)
-		return (error);
-	while ((len = receive_message(g_sock, fromstr, sizeof(fromstr),
-	    &msg)) > 0) {
-		/*
-		 * With len == 0 the packet was rejected (probably because it
-		 * was too small) so just ignore this case.
-		 */
+	path = NULL;
+	error = netdump_cap_herald(g_capherald, &sd, &saddr, &seqno, &path);
+	if (error != 0) {
+		LOGERR("netdump_cap_herald(): %s\n", strerror(error));
+		goto out;
+	}
 
-		LIST_FOREACH(client, &g_clients, iter)
-			if (client->ip.s_addr == msg.nm_src->sin_addr.s_addr)
-				break;
-
-		if (msg.nm_pkt.hdr.mh_type != NETDUMP_HERALD) {
-			LOGERR(
-			    "Received message type %d from %s on server port\n",
-			    msg.nm_pkt.hdr.mh_type, fromstr);
-			continue;
-		}
-
-		/*
-		 * Pull out the destination address so that we know how to
-		 * reply.
-		 */
-		cmh = CMSG_FIRSTHDR(&msg.nm_msg);
-		if (cmh->cmsg_level != IPPROTO_IP ||
-		    cmh->cmsg_type != IP_RECVDSTADDR) {
-			LOGERR(
-		    "Got unexpected control message %d in packet from %s\n",
-			    cmh->cmsg_type, fromstr);
-			continue;
-		}
-		msg.nm_dst = (struct in_addr *)(void *)CMSG_DATA(msg.nm_cmsg);
-
-		/*
-		 * The client may be non-NULL here if we're receiving a
-		 * retransmit of a HERALD.
-		 */
-		if (handle_packet(client, fromstr, &msg))
+	LIST_FOREACH(client, &g_clients, iter) {
+		if (client->ip.s_addr == saddr.sin_addr.s_addr)
 			break;
 	}
-	fini_recvmsg(&msg);
-	if (len < 0 && errno != EAGAIN) {
-		LOGERR_PERROR("recvfrom()");
-		return (1);
+
+	if (client != NULL) {
+		if (!client->any_data_rcvd) {
+			/* retransmit of the herald packet */
+			send_ack(client, seqno);
+			goto out;
+		}
+		handle_timeout(client);
 	}
-	return (0);
+
+	client = alloc_client(sd, &saddr, path);
+	if (client == NULL) {
+		LOGERR(
+		    "server_event(): new client allocation failure\n");
+		goto out;
+	}
+
+	client_pinfo(client, "Dump from %s [%s]\n", client->hostname,
+	    client_ntoa(client));
+	LOGINFO("New dump from client %s [%s] (to %s)\n", client->hostname,
+	    client_ntoa(client), client->corefilename);
+	send_ack(client, seqno);
+	return;
+
+out:
+	free(path);
 }
 
 /* Handle a read event on a client socket. */
 static void
 client_event(struct netdump_client *client)
 {
-	char fromstr[INET_ADDRSTRLEN + 6];
-	struct netdump_msg msg;
+	struct netdump_pkt pkt;
 	ssize_t len;
-	int error;
 
-	error = init_recvmsg(&msg);
-	if (error != 0)
-		return;
-	while ((len = receive_message(client->sock, fromstr, sizeof(fromstr),
-	    &msg)) > 0) {
-		/*
-		 * With len == 0 the packet was rejected (probably because it
-		 * was too small) so just ignore this case.
-		 */
-
-		if (msg.nm_pkt.hdr.mh_type == NETDUMP_HERALD) {
-			LOGERR("Received herald from %s on client port\n",
-			    fromstr);
-			continue;
+	if ((len = recv(client->sock, &pkt, sizeof(pkt), 0)) < 0) {
+		if (errno != EAGAIN && errno != EINTR) {
+			LOGERR_PERROR("recv()");
+			handle_timeout(client);
 		}
-
-		if (handle_packet(client, fromstr, &msg))
-			break;
+		return;
 	}
-	fini_recvmsg(&msg);
-	if (len == -1 && errno != EAGAIN) {
-		LOGERR_PERROR("recvfrom()");
-		handle_timeout(client);
+
+	if ((size_t)len < sizeof(struct netdump_msg_hdr)) {
+		LOGERR("Ignoring runt packet from %s (got %zu)\n",
+		    client_ntoa(client), (size_t)len);
+		return;
+	}
+
+	ndtoh(&pkt.hdr);
+
+	if ((size_t)len - sizeof(struct netdump_msg_hdr) != pkt.hdr.mh_len) {
+		LOGERR("Bad packet size from %s\n", client_ntoa(client));
+		return;
+	}
+
+	client->last_msg = time(NULL);
+
+	switch (pkt.hdr.mh_type) {
+	case NETDUMP_KDH:
+		handle_kdh(client, &pkt);
+		break;
+	case NETDUMP_VMCORE:
+		handle_vmcore(client, &pkt);
+		break;
+	case NETDUMP_FINISHED:
+		handle_finish(client, &pkt);
+		break;
+	default:
+		LOGERR("Received unexpected message type %d from %s\n",
+		    pkt.hdr.mh_type, client_ntoa(client));
+		break;
 	}
 }
 
@@ -840,8 +639,10 @@ eventloop(void)
 {
 	struct kevent events[8];
 	struct timespec ts;
-	struct netdump_client *client, *tmp;
+	struct netdump_client *client;
 	int ev, rc;
+
+	LOGINFO("Waiting for clients.\n");
 
 	/* We check for timed-out clients regularly. */
 	ts.tv_sec = CLIENT_TPASS;
@@ -850,6 +651,8 @@ eventloop(void)
 	for (;;) {
 		rc = kevent(g_kq, NULL, 0, events, nitems(events), &ts);
 		if (rc < 0) {
+			if (errno == EINTR)
+				continue;
 			LOGERR_PERROR("kevent()");
 			return (1);
 		}
@@ -860,20 +663,18 @@ eventloop(void)
 				/* We received SIGINT or SIGTERM. */
 				goto out;
 
-			if ((int)events[ev].ident == g_sock)
-				if (server_event() != 0)
-					return (1);
-
-			/*
-			 * handle_packet() and handle_timeout() may free the client,
-			 * handle stale pointers.
-			 */
-			LIST_FOREACH_SAFE(client, &g_clients, iter, tmp) {
-				if (client->sock == (int)events[ev].ident) {
+			if (events[ev].filter == EVFILT_READ) {
+				if ((int)events[ev].ident == g_sock)
+					server_event();
+				else {
+					client = events[ev].udata;
 					client_event(client);
-					break;
 				}
+				continue;
 			}
+
+			LOGERR("unexpected event %d", events[ev].filter);
+			break;
 		}
 
 		timeout_clients();
@@ -897,10 +698,8 @@ get_script_option(void)
 	char *script;
 
 	script = strdup(optarg);
-	if (script == NULL) {
+	if (script == NULL)
 		err(1, "strdup()");
-		return (NULL);
-	}
 	if (access(script, F_OK | X_OK)) {
 		warn("cannot access %s", script);
 		free(script);
@@ -909,10 +708,105 @@ get_script_option(void)
 	return (script);
 }
 
+/*
+ * Enter capability mode. This effectively sandboxes netdumpd by restricting its
+ * ability to acquire new rights. In particular, capability mode enforces
+ * restrictions on the dump path specified by a client: such paths are not
+ * allowed to contain a '..' component or to follow a symlink containing '..'.
+ *
+ * Some operations that we need to perform after this point cannot be executed
+ * in capability mode, so a few libcasper services are used. system.dns lets us
+ * perform reverse lookups of client addresses, netdumpd.herald handles incoming
+ * netdump requests and creates sockets for them, and netdumpd.handler is used
+ * to execute a pre-defined script upon completion (successful or otherwise) of
+ * a netdump.
+ */
+static int
+init_cap_mode(void)
+{
+	cap_rights_t rights;
+	cap_channel_t *capcasper;
+	nvlist_t *limits;
+	int error;
+
+	error = 1;
+
+	caph_cache_catpages();
+
+	capcasper = cap_init();
+	if (capcasper == NULL) {
+		LOGERR_PERROR("cap_init()");
+		return (1);
+	}
+
+	if (cap_enter() != 0) {
+		LOGERR_PERROR("cap_enter()");
+		goto err;
+	}
+
+	/* CAP_FCNTL is needed by fdopen(3). */
+	cap_rights_init(&rights, CAP_CREATE, CAP_FCNTL, CAP_PWRITE, CAP_READ,
+	    CAP_SYMLINKAT, CAP_UNLINKAT);
+	if (cap_rights_limit(g_dumpdir_fd, &rights) != 0) {
+		LOGERR_PERROR("cap_rights_limit()");
+		goto err;
+	}
+	cap_rights_init(&rights, CAP_SEND, CAP_RECV);
+	if (cap_rights_limit(g_sock, &rights) != 0) {
+		LOGERR_PERROR("cap_rights_limit()");
+		goto err;
+	}
+
+	g_capdns = cap_service_open(capcasper, "system.dns");
+	if (g_capdns == NULL) {
+		LOGERR_PERROR("cap_service_open(system.dns)");
+		goto err;
+	}
+	limits = nvlist_create(0);
+	nvlist_add_string(limits, "type", "NAME");
+	nvlist_add_number(limits, "family", (uint64_t)AF_INET);
+	if (cap_limit_set(g_capdns, limits) != 0) {
+		LOGERR_PERROR("cap_limit_set(system.dns)");
+		goto err;
+	}
+
+	g_capherald = cap_service_open(capcasper, "netdumpd.herald");
+	if (g_capherald == NULL) {
+		LOGERR_PERROR("cap_service_open(netdumpd.herald)");
+		goto err;
+	}
+	limits = nvlist_create(0);
+	nvlist_add_descriptor(limits, "socket", g_sock);
+	if (cap_limit_set(g_capherald, limits) != 0) {
+		LOGERR_PERROR("cap_limit_set(netdump.herald)");
+		goto err;
+	}
+
+	if (g_handler_script != NULL) {
+		g_caphandler = cap_service_open(capcasper, "netdumpd.handler");
+		if (g_caphandler == NULL) {
+			LOGERR_PERROR("cap_service_open(netdumpd.handler)");
+			goto err;
+		}
+		limits = nvlist_create(0);
+		nvlist_add_string(limits, "handler_script", g_handler_script);
+		if (cap_limit_set(g_caphandler, limits) != 0) {
+			LOGERR_PERROR("cap_limit_set(netdump.handler)");
+			goto err;
+		}
+	}
+
+	error = 0;
+
+err:
+	/* Other capabilities are closed by main(). */
+	cap_close(capcasper);
+	return (error);
+}
+
 static int
 init_kqueue(void)
 {
-	struct sigaction sa;
 	struct kevent sockev, sigev[2];
 	sigset_t set;
 
@@ -934,14 +828,6 @@ init_kqueue(void)
 		LOGERR_PERROR("sigprocmask()");
 		return (1);
 	}
-	memset(&sa, 0, sizeof(sa));
-	sa.sa_handler = SIG_IGN;
-	sa.sa_flags = SA_NOCLDWAIT;
-	if (sigaction(SIGCHLD, &sa, NULL)) {
-		LOGERR_PERROR("sigaction(SIGCHLD)");
-		return (1);
-	}
-
 	EV_SET(&sigev[0], SIGINT, EVFILT_SIGNAL, EV_ADD, 0, 0, NULL);
 	EV_SET(&sigev[1], SIGTERM, EVFILT_SIGNAL, EV_ADD, 0, 0, NULL);
 	if (kevent(g_kq, sigev, nitems(sigev), NULL, 0, NULL) != 0) {
@@ -969,7 +855,7 @@ init_server_socket(void)
 	 * When a client initiates a netdump, we must ensure that we respond
 	 * using the source address expected by the client. We thus configure
 	 * IP_RECVDSTADDR so that we may bind+connect using the provided
-	 * address.
+	 * address. (The bind+connect is done by a libcasper service.)
 	 */
 	one = 1;
 	if (setsockopt(g_sock, IPPROTO_IP, IP_RECVDSTADDR, &one,
@@ -1004,24 +890,16 @@ main(int argc, char **argv)
 
 	g_bindip.s_addr = INADDR_ANY;
 
-	exit_code = 0;
+	exit_code = 1;
 	pidfile[0] = '\0';
-	while ((ch = getopt(argc, argv, "a:b:Dd:i:P:")) != -1) {
+	while ((ch = getopt(argc, argv, "a:Dd:i:P:p:")) != -1) {
 		switch (ch) {
 		case 'a':
 			if (inet_aton(optarg, &g_bindip) == 0) {
 				warnx("invalid bind IP specified");
-				exit_code = 1;
 				goto cleanup;
 			}
 			warnx("listening on IP %s", optarg);
-			break;
-		case 'b':
-			g_handler_pre_script = get_script_option();
-			if (g_handler_pre_script == NULL) {
-				exit_code = 1;
-				goto cleanup;
-			}
 			break;
 		case 'D':
 			g_debug = true;
@@ -1030,28 +908,30 @@ main(int argc, char **argv)
 			if (strlcpy(g_dumpdir, optarg, sizeof(g_dumpdir)) >=
 			    sizeof(g_dumpdir)) {
 				warnx("dumpdir '%s' is too long", optarg);
-				exit_code = 1;
 				goto cleanup;
 			}
 			break;
 		case 'i':
 			g_handler_script = get_script_option();
-			if (g_handler_script == NULL) {
-				exit_code = 1;
+			if (g_handler_script == NULL)
 				goto cleanup;
-			}
 			break;
 		case 'P':
 			if (strlcpy(pidfile, optarg, sizeof(pidfile)) >=
 			    sizeof(pidfile)) {
 				warnx("pidfile '%s' is too long", optarg);
-				exit_code = 1;
+				goto cleanup;
+			}
+			break;
+		case 'p':
+			if (strlcpy(g_defpath, optarg, sizeof(g_defpath)) >=
+			    sizeof(g_defpath)) {
+				warnx("default path '%s' is too long", optarg);
 				goto cleanup;
 			}
 			break;
 		default:
 			usage(argv[0]);
-			exit_code = 1;
 			goto cleanup;
 		}
 	}
@@ -1064,19 +944,18 @@ main(int argc, char **argv)
 			err(1, "pidfile_open");
 	}
 
-	if (g_dumpdir[0] == '\0') {
-		strcpy(g_dumpdir, "/var/crash");
-		warnx("default: dumping to /var/crash/");
-	}
-
 	if (g_debug)
 		g_phook = phook_printf;
 	else
 		g_phook = syslog;
 
-	exit_code = 1;
+	if (g_dumpdir[0] == '\0') {
+		strcpy(g_dumpdir, "/var/crash");
+		warnx("default: dumping to /var/crash/");
+	}
+	if (g_defpath[0] == '\0')
+		strcpy(g_defpath, ".");
 
-	/* Further sanity checks on dump location. */
 	if (stat(g_dumpdir, &statbuf)) {
 		warnx("invalid dump location specified");
 		goto cleanup;
@@ -1087,6 +966,12 @@ main(int argc, char **argv)
 	}
 	if (access(g_dumpdir, F_OK | W_OK))
 		warn("warning: may be unable to write into dump location");
+
+	g_dumpdir_fd = open(g_dumpdir, O_DIRECTORY | O_RDONLY | O_CLOEXEC);
+	if (g_dumpdir_fd < 0) {
+		warn("open(%s)", g_dumpdir);
+		goto cleanup;
+	}
 
 	if (!g_debug && daemon(0, 0) == -1) {
 		warn("daemon()");
@@ -1099,19 +984,23 @@ main(int argc, char **argv)
 
 	if (init_server_socket())
 		goto cleanup;
-
 	if (init_kqueue())
 		goto cleanup;
+	if (init_cap_mode())
+		goto cleanup;
 
-	LOGINFO("Waiting for clients.\n");
 	exit_code = eventloop();
 
 cleanup:
 	if (g_pfh != NULL)
 		pidfile_remove(g_pfh);
-	free(g_handler_pre_script);
+	(void)close(g_dumpdir_fd);
 	free(g_handler_script);
 	if (g_sock != -1)
 		close(g_sock);
+	if (g_capherald != NULL)
+		cap_close(g_capherald);
+	if (g_capdns != NULL)
+		cap_close(g_capdns);
 	return (exit_code);
 }
