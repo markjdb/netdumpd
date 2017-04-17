@@ -16,7 +16,6 @@ WARNS?=	6
 
 # rc.d script.
 FILES=	netdumpd
-FILESDIR= /etc/rc.d
 FILESMODE= 0555
 
 .include <bsd.prog.mk>
