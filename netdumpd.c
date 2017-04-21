@@ -58,7 +58,6 @@ __FBSDID("$FreeBSD$");
 #include <syslog.h>
 #include <unistd.h>
 
-#include <capsicum_helpers.h>
 #include <libcasper.h>
 #include <casper/cap_dns.h>
 
@@ -730,8 +729,6 @@ init_cap_mode(void)
 	int error;
 
 	error = 1;
-
-	caph_cache_catpages();
 
 	capcasper = cap_init();
 	if (capcasper == NULL) {
