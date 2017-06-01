@@ -15,7 +15,6 @@ CFLAGS+= -I${.CURDIR}/. -O0
 WARNS?=	6
 
 # rc.d script.
-FILES=	netdumpd
-FILESMODE= 0555
+SUBDIR+=	etc/rc.d
 
 .include <bsd.prog.mk>
