@@ -1,10 +1,10 @@
 #!/bin/sh
 
-if [ $# -ne 1 ]; then
-    echo "usage: $(basename $0) <version>" >&2
+if [ $# -ne 0 ]; then
+    echo "usage: $(basename $0)" >&2
     exit 1
 fi
 
-vers=$1
+vers=$(date +"%Y%m%d")
 git archive --format=tar --prefix=netdumpd-${vers}/ master | \
     gzip > netdumpd-${vers}.tar.gz
