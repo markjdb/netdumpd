@@ -102,7 +102,7 @@ struct netdump_client {
 	int		corefd;
 	int		sock;
 	bool		any_data_rcvd;
-	size_t		vmcorebufoff;
+	ssize_t		vmcorebufoff;
 	off_t		vmcoreoff;
 	uint8_t		vmcorebuf[VMCORE_BUFSZ];
 };
@@ -370,7 +370,7 @@ vmcore_flush(struct netdump_client *client)
 {
 
 	if (pwrite(client->corefd, client->vmcorebuf, client->vmcorebufoff,
-	    client->vmcoreoff) != (ssize_t)client->vmcorebufoff) {
+	    client->vmcoreoff) != client->vmcorebufoff) {
 		LOGERR("pwrite (for client %s [%s]): %s\n", client->hostname,
 		    client_ntoa(client), strerror(errno));
 		client_pinfo(client,
@@ -484,7 +484,8 @@ handle_vmcore(struct netdump_client *client, struct netdump_pkt *pkt)
 	 */
 	if (client->vmcorebufoff + NETDUMP_DATASIZE > VMCORE_BUFSZ ||
 	    (client->vmcorebufoff > 0 &&
-	    client->vmcoreoff + client->vmcorebufoff != pkt->hdr.mh_offset))
+	     client->vmcoreoff + client->vmcorebufoff !=
+	     (off_t)pkt->hdr.mh_offset))
 		if (vmcore_flush(client) != 0)
 			return;
 
