@@ -179,7 +179,7 @@ alloc_client(int sd, struct sockaddr_in *saddr, char *path)
 {
 	struct kevent event;
 	struct netdump_client *client;
-	char *firstdot;
+	char *firstdot, *origpath;
 	size_t len;
 	int i, error, fd, bufsz;
 
@@ -207,7 +207,7 @@ alloc_client(int sd, struct sockaddr_in *saddr, char *path)
 			goto error_out;
 		}
 	} else {
-		/* Strip off the domain name */
+		/* Strip off the domain name. */
 		firstdot = strchr(client->hostname, '.');
 		if (firstdot)
 			*firstdot = '\0';
@@ -223,11 +223,11 @@ alloc_client(int sd, struct sockaddr_in *saddr, char *path)
 		    client->hostname);
 	}
 
+	origpath = path;
 retry:
 	if (path == NULL)
-		client->path = strdup(g_defpath);
-	else
-		client->path = path;
+		path = strdup(g_defpath);
+	client->path = path;
 
 	/*
 	 * Try info.host.0 through info.host.255 in sequence. First try to
@@ -287,12 +287,12 @@ retry:
 	}
 
 	if (client->infofile == NULL || client->corefd == -1) {
-		if (path != NULL) {
+		if (origpath != NULL) {
 			LOGWARN(
     "Can't create output files in path for client %s, retrying with default\n",
 			    client->hostname);
-			free(path);
-			path = NULL;
+			free(origpath);
+			origpath = path = NULL;
 			goto retry;
 		}
 		LOGERR("Can't create output files for new client %s [%s]\n",
@@ -310,6 +310,7 @@ retry:
 	return (client);
 
 error_out:
+	free(path);
 	if (client != NULL) {
 		if (client->infofile != NULL)
 			(void)fclose(client->infofile);
@@ -548,11 +549,10 @@ server_event(void)
 	uint32_t seqno;
 	int error, sd;
 
-	path = NULL;
 	error = netdump_cap_herald(g_capherald, &sd, &saddr, &seqno, &path);
 	if (error != 0) {
 		LOGERR("netdump_cap_herald(): %s\n", strerror(error));
-		goto out;
+		return;
 	}
 
 	LIST_FOREACH(client, &g_clients, iter) {
@@ -564,7 +564,7 @@ server_event(void)
 		if (!client->any_data_rcvd) {
 			/* retransmit of the herald packet */
 			send_ack(client, seqno);
-			goto out;
+			return;
 		}
 		handle_timeout(client);
 	}
@@ -573,7 +573,7 @@ server_event(void)
 	if (client == NULL) {
 		LOGERR(
 		    "server_event(): new client allocation failure\n");
-		goto out;
+		return;
 	}
 
 	client_pinfo(client, "Dump from %s [%s]\n", client->hostname,
@@ -581,10 +581,6 @@ server_event(void)
 	LOGINFO("New dump from client %s [%s] (to %s)\n", client->hostname,
 	    client_ntoa(client), client->corefilename);
 	send_ack(client, seqno);
-	return;
-
-out:
-	free(path);
 }
 
 /* Handle a read event on a client socket. */
