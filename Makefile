@@ -10,7 +10,7 @@ BINDIR=	/usr/sbin
 LDADD+=	-lcasper -lcap_dns -lnv -lutil
 
 # Only for external build.
-CFLAGS+= -I${.CURDIR}/. -O0
+CFLAGS+= -I${.CURDIR}
 
 WARNS?=	6
 
