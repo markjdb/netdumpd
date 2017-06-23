@@ -995,8 +995,8 @@ main(int argc, char **argv)
 	exit_code = eventloop();
 
 cleanup:
-	if (g_pfh != NULL)
-		pidfile_remove(g_pfh);
+	if (g_pfh != NULL && pidfile_remove(g_pfh) != 0)
+		warn("pidfile_remove");
 	(void)close(g_dumpdir_fd);
 	free(g_handler_script);
 	if (g_sock != -1)
