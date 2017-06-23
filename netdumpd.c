@@ -502,7 +502,7 @@ handle_vmcore(struct netdump_client *client, struct netdump_pkt *pkt)
 static void
 handle_finish(struct netdump_client *client, struct netdump_pkt *pkt)
 {
-	char symlinkpath[MAXPATHLEN];
+	char symlinkpath[MAXPATHLEN], *symlinktarget;
 
 	/* Make sure we commit any buffered vmcore data. */
 	if (vmcore_flush(client) != 0)
@@ -516,20 +516,29 @@ handle_finish(struct netdump_client *client, struct netdump_pkt *pkt)
 		LOGERR_PERROR("unlinkat()");
 		return;
 	}
-	if (symlinkat(client->corefilename, g_dumpdir_fd, symlinkpath) != 0) {
+	symlinktarget = strdup(client->corefilename);
+	if (symlinkat(basename(symlinktarget), g_dumpdir_fd,
+	    symlinkpath) != 0) {
 		LOGERR_PERROR("symlink()");
+		free(symlinktarget);
 		return;
 	}
+	free(symlinktarget);
+
 	snprintf(symlinkpath, sizeof(symlinkpath), "%s/info.%s.last",
 	    client->path, client->hostname);
 	if (unlinkat(g_dumpdir_fd, symlinkpath, 0) != 0 && errno != ENOENT) {
 		LOGERR_PERROR("unlinkat()");
 		return;
 	}
-	if (symlinkat(client->infofilename, g_dumpdir_fd, symlinkpath) != 0) {
+	symlinktarget = strdup(client->infofilename);
+	if (symlinkat(basename(symlinktarget), g_dumpdir_fd,
+	    symlinkpath) != 0) {
 		LOGERR_PERROR("symlink()");
+		free(symlinktarget);
 		return;
 	}
+	free(symlinktarget);
 
 	LOGINFO("\nCompleted dump from client %s [%s]\n", client->hostname,
 	    client_ntoa(client));
