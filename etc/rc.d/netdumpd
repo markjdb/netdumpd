@@ -11,6 +11,7 @@ name="netdumpd"
 rcvar="netdumpd_enable"
 rcflags="${netdumpd_flags}"
 command="/usr/local/sbin/${name}"
+pidfile="/var/run/${name}.pid"
 
 load_rc_config $name
 run_rc_command "$1"
