@@ -24,7 +24,7 @@
 .\"
 .\" $FreeBSD$
 .\"
-.Dd April 12, 2017
+.Dd June 28, 2017
 .Dt NETDUMPD 8
 .Os
 .Sh NAME
@@ -72,9 +72,9 @@ Additionally, no symbolic link in the path may contain ".." components.
 Execute the script
 .Dq Pa script
 after each dump received.
-The script receives the same parameters as the
-.Fl b
-.Pa prescript .
+The script accepts the following strings as parameters: its name, reasons for
+invocation, the client address, the client hostname, the info file name and the
+core dump file name.
 .It Fl P
 Specify an alternative file in which to store the process ID.
 The default is
