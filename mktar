@@ -6,5 +6,6 @@ if [ $# -ne 0 ]; then
 fi
 
 vers=$(date +"%Y%m%d")
-git archive --format=tar --prefix=netdumpd-${vers}/ master | \
-    gzip > netdumpd-${vers}.tar.gz
+file=netdumpd-${vers}.tar.gz
+git archive --format=tar --prefix=netdumpd-${vers}/ master | gzip > $file
+scp $file markj@freefall.freebsd.org:public_distfiles/
