@@ -792,6 +792,7 @@ init_cap_mode(void)
 			goto err;
 		}
 		limits = nvlist_create(0);
+		nvlist_add_string(limits, "dumpdir", g_dumpdir);
 		nvlist_add_string(limits, "handler_script", g_handler_script);
 		if (cap_limit_set(g_caphandler, limits) != 0) {
 			LOGERR_PERROR("cap_limit_set(netdump.handler)");

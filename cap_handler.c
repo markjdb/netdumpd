@@ -41,8 +41,8 @@
 
 /*
  * The handler capability lets us invoke a script upon completion (successful or
- * otherwise) of a netdump. We do not want the script to execute in capability
- * mode.
+ * otherwise) of a netdump. The script is executed with cwd set to the dumpdir.
+ * We do not want the script to execute in capability mode.
  */
 
 int
@@ -101,7 +101,7 @@ handler_command(const char *cmd, const nvlist_t *limits, nvlist_t *nvlin,
 static int
 handler_limits(const nvlist_t *oldlimits, const nvlist_t *newlimits)
 {
-	const char *name;
+	const char *dumpdir, *name;
 	void *cookie;
 	int nvtype;
 	bool hasscript;
@@ -113,14 +113,21 @@ handler_limits(const nvlist_t *oldlimits, const nvlist_t *newlimits)
 	cookie = NULL;
 	hasscript = false;
 	while ((name = nvlist_next(newlimits, &nvtype, &cookie)) != NULL) {
-		if (nvtype == NV_TYPE_STRING &&
-		    strcmp(name, "handler_script") == 0)
-			hasscript = true;
-		else
+		if (nvtype == NV_TYPE_STRING) {
+			if (strcmp(name, "handler_script") == 0)
+				hasscript = true;
+			else if (strcmp(name, "dumpdir") != 0)
+				return (EINVAL);
+		} else
 			return (EINVAL);
 	}
 	if (!hasscript)
 		return (EINVAL);
+
+	if ((dumpdir = nvlist_get_string(newlimits, "dumpdir")) != NULL)
+		if (chdir(dumpdir) != 0)
+			return (errno);
+
 	return (0);
 }
 
