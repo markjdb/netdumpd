@@ -72,9 +72,12 @@ Additionally, no symbolic link in the path may contain ".." components.
 Execute the script
 .Dq Pa script
 after each dump received.
-The script accepts the following strings as parameters: its name, reasons for
+The script accepts the following strings as parameters: a reason for
 invocation, the client address, the client hostname, the info file name and the
 core dump file name.
+The script is executed from the
+.Dq Pa dumpdir
+directory.
 .It Fl P
 Specify an alternative file in which to store the process ID.
 The default is
