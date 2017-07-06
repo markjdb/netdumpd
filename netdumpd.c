@@ -149,16 +149,16 @@ static void	phook_printf(int priority, const char *message, ...)
 static void	send_ack(struct netdump_client *client, uint32_t seqno);
 static void	server_event(void);
 static void	timeout_clients(void);
-static void	usage(char *cmd);
+static void	usage(void);
 
 static void
-usage(char *cmd)
+usage(void)
 {
 
 	fprintf(stderr,
 "usage: %s [-D] [-a bind_addr] [-d dumpdir] [-i script] [-b script]\n"
 "\t\t[-P pidfile] [-p default path]\n",
-	    basename(cmd));
+	    getprogname());
 }
 
 static void
@@ -935,10 +935,14 @@ main(int argc, char **argv)
 			}
 			break;
 		default:
-			usage(argv[0]);
+			usage();
 			goto cleanup;
 		}
 	}
+	argc -= optind;
+	argv += optind;
+	if (argc != 0)
+		usage();
 
 	g_pfh = pidfile_open(pidfile[0] != '\0' ? pidfile : NULL, 0600, NULL);
 	if (g_pfh == NULL) {
