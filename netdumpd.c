@@ -578,7 +578,9 @@ server_event(void)
 		handle_timeout(client);
 	}
 
+	/* path is always consumed or freed by alloc_client(). */
 	client = alloc_client(sd, &saddr, path);
+	path = NULL;
 	if (client == NULL) {
 		LOGERR(
 		    "server_event(): new client allocation failure\n");
