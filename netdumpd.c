@@ -397,12 +397,8 @@ timeout_clients(void)
 
 	/* Traverse the list looking for stale clients. */
 	LIST_FOREACH_SAFE(client, &g_clients, iter, tmp) {
-		if (client->last_msg + CLIENT_TIMEOUT < g_now) {
-			LOGINFO("Timingout with such values: %jd + %jd < %jd\n",
-			    (intmax_t)client->last_msg,
-			    (intmax_t)CLIENT_TIMEOUT, (intmax_t)g_now);
+		if (client->last_msg + CLIENT_TIMEOUT < g_now)
 			handle_timeout(client);
-		}
 	}
 }
 
