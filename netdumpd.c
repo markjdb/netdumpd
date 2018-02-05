@@ -156,8 +156,8 @@ usage(void)
 {
 
 	fprintf(stderr,
-"usage: %s [-D] [-a bind_addr] [-d dumpdir] [-i script] [-b script]\n"
-"\t\t[-P pidfile] [-p default path]\n",
+"usage: %s [-D] [-a <bind_addr>] [-d <dumpdir>] [-i <script>] [-P <pidfile>]\n"
+"\t\t[-p <default path>]\n",
 	    getprogname());
 }
 
