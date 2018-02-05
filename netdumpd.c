@@ -423,6 +423,17 @@ send_ack(struct netdump_client *client, uint32_t seqno)
 static void
 handle_kdh(struct netdump_client *client, struct netdump_pkt *pkt)
 {
+#if KERNELDUMPVERSION >= 3
+	const char *const compalgos[] = {
+	    [KERNELDUMP_COMP_NONE] = "none",
+	    [KERNELDUMP_COMP_GZIP] = "gzip",
+#ifdef KERNELDUMP_COMP_ZSTD
+	    [KERNELDUMP_COMP_ZSTD] = "zstd",
+#endif
+	    NULL,
+	};
+#endif
+	const char *algo;
 	time_t t;
 	uint64_t dumplen;
 	struct kerneldumpheader *h;
@@ -445,6 +456,13 @@ handle_kdh(struct netdump_client *client, struct netdump_pkt *pkt)
 	h->versionstring[sizeof(h->versionstring) - 1] = '\0';
 	h->panicstring[sizeof(h->panicstring) - 1] = '\0';
 
+#if KERNELDUMPVERSION >= 3
+	if (h->compression < nitems(compalgos))
+		algo = compalgos[h->compression];
+	else
+		algo = "???";
+#endif
+
 	client_pinfo(client, "  Architecture: %s\n", h->architecture);
 	client_pinfo(client, "  Architecture version: %d\n",
 	    dtoh32(h->architectureversion));
@@ -453,6 +471,7 @@ handle_kdh(struct netdump_client *client, struct netdump_pkt *pkt)
 	    (long long)dumplen, (long long)(dumplen >> 20));
 	client_pinfo(client, "  Blocksize: %d\n", dtoh32(h->blocksize));
 	t = dtoh64(h->dumptime);
+	client_pinfo(client, "  Compression: %s\n", algo);
 	client_pinfo(client, "  Dumptime: %s", ctime(&t));
 	client_pinfo(client, "  Hostname: %s\n", h->hostname);
 	client_pinfo(client, "  Versionstring: %s", h->versionstring);
