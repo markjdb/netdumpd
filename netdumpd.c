@@ -60,6 +60,9 @@ __FBSDID("$FreeBSD$");
 
 #include <libcasper.h>
 #include <casper/cap_dns.h>
+#if __FreeBSD_version >= 1200000
+#include <casper/cap_syslog.h>
+#endif
 
 #include <libutil.h>
 
@@ -113,7 +116,7 @@ struct netdump_client {
 static LIST_HEAD(, netdump_client) g_clients = LIST_HEAD_INITIALIZER(g_clients);
 
 /* Capabilities. */
-static cap_channel_t *g_capdns, *g_caphandler, *g_capherald;
+static cap_channel_t *g_capdns, *g_capsyslog, *g_caphandler, *g_capherald;
 
 /* Program arguments handlers. */
 static char g_dumpdir[MAXPATHLEN];
@@ -164,15 +167,30 @@ usage(void)
 }
 
 static void
-phook_printf(int priority, const char *message, ...)
+phook_printf(int priority, const char *fmt, ...)
 {
 	va_list ap;
 
-	va_start(ap, message);
+	va_start(ap, fmt);
 	if ((priority & LOG_INFO) != 0)
-		vprintf(message, ap);
+		vprintf(fmt, ap);
 	else
-		vfprintf(stderr, message, ap);
+		vfprintf(stderr, fmt, ap);
+	va_end(ap);
+}
+
+static void
+phook_syslog(int priority, const char *fmt, ...)
+{
+	va_list ap;
+
+	va_start(ap, fmt);
+#if __FreeBSD_version >= 1200000
+	if (g_capsyslog != NULL)
+		cap_vsyslog(g_capsyslog, priority, fmt, ap);
+	else
+#endif
+		vsyslog(priority, fmt, ap);
 	va_end(ap);
 }
 
@@ -751,10 +769,9 @@ handle_vmcore(struct netdump_client *client, struct netdump_pkt *pkt)
 {
 
 	client->any_data_rcvd = true;
-	if (pkt->hdr.mh_seqno % (16 * 1024 * 1024 / 1456) == 0) {
+	if (pkt->hdr.mh_seqno % (16 * 1024 * 1024 / 1456) == 0 && g_debug)
 		/* Approximately every 16MB with MTU of 1500 */
 		LOGINFO(".");
-	}
 
 	/*
 	 * Flush the vmcore buffer if it's full, or if the received segment
@@ -1009,10 +1026,10 @@ get_script_option(void)
  *
  * Some operations that we need to perform after this point cannot be executed
  * in capability mode, so a few libcasper services are used. system.dns lets us
- * perform reverse lookups of client addresses, netdumpd.herald handles incoming
- * netdump requests and creates sockets for them, and netdumpd.handler is used
- * to execute a pre-defined script upon completion (successful or otherwise) of
- * a netdump.
+ * perform reverse lookups of client addresses, system.syslog is used to talk to
+ * syslogd, netdumpd.herald handles incoming netdump requests and creates
+ * sockets for them, and netdumpd.handler is used to execute a pre-defined
+ * script upon completion (successful or otherwise) of a netdump.
  */
 static int
 init_cap_mode(void)
@@ -1062,6 +1079,12 @@ init_cap_mode(void)
 		goto err;
 	}
 
+	g_capsyslog = cap_service_open(capcasper, "system.syslog");
+	if (g_capsyslog == NULL) {
+		LOGERR_PERROR("cap_service_open(system.syslog)");
+		/* Non-fatal. */
+	}
+
 	g_capherald = cap_service_open(capcasper, "netdumpd.herald");
 	if (g_capherald == NULL) {
 		LOGERR_PERROR("cap_service_open(netdumpd.herald)");
@@ -1095,6 +1118,20 @@ err:
 	/* Other capabilities are closed by main(). */
 	cap_close(capcasper);
 	return (error);
+}
+
+static void
+close_caps(void)
+{
+
+	if (g_caphandler != NULL)
+		cap_close(g_caphandler);
+	if (g_capherald != NULL)
+		cap_close(g_capherald);
+	if (g_capsyslog != NULL)
+		cap_close(g_capsyslog);
+	if (g_capdns != NULL)
+		cap_close(g_capdns);
 }
 
 static int
@@ -1241,10 +1278,7 @@ main(int argc, char **argv)
 			err(1, "pidfile_open");
 	}
 
-	if (g_debug)
-		g_phook = phook_printf;
-	else
-		g_phook = syslog;
+	g_phook = g_debug ? phook_printf : phook_syslog;
 
 	if (g_dumpdir[0] == '\0') {
 		strcpy(g_dumpdir, "/var/crash");
@@ -1286,6 +1320,13 @@ main(int argc, char **argv)
 	if (init_cap_mode())
 		goto cleanup;
 
+#if __FreeBSD_version >= 1200000
+	if (g_capsyslog != NULL)
+		cap_openlog(g_capsyslog, "netdumpd", LOG_NDELAY, LOG_DAEMON);
+	else
+#endif
+		openlog("netdumpd", LOG_NDELAY, LOG_DAEMON);
+
 	exit_code = eventloop();
 
 cleanup:
@@ -1295,9 +1336,6 @@ cleanup:
 	free(g_handler_script);
 	if (g_sock != -1)
 		close(g_sock);
-	if (g_capherald != NULL)
-		cap_close(g_capherald);
-	if (g_capdns != NULL)
-		cap_close(g_capdns);
+	close_caps();
 	return (exit_code);
 }

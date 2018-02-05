@@ -1,0 +1,8 @@
+- configurable dump rotation policy
+  - number or total size per host
+  - global size limit, w/ LRU reclaim
+- how to handle dump map grown?
+- how to handle missing KDH?
+- how to ensure transfers from signed sources?
+- return server path to client after _FINISH
+  - how to handle lost packets?

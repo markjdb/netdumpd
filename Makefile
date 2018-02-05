@@ -7,7 +7,7 @@ SRCS=	netdumpd.c	\
 MAN=	netdumpd.8
 BINDIR=	/usr/sbin
 
-LDADD+=	-lcasper -lcap_dns -lnv -lutil
+LDADD+=	-lcasper -lcap_dns -lcap_syslog -lnv -lutil
 
 CFLAGS+= -DWITH_CASPER -I${.CURDIR}
 

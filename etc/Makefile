@@ -1,5 +1,7 @@
 # $FreeBSD$
 
-SUBDIR+=	rc.d
+SUBDIR+=	newsyslog.d \
+		rc.d \
+		syslog.d
 
 .include <bsd.subdir.mk>
