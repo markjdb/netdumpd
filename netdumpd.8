@@ -24,7 +24,7 @@
 .\"
 .\" $FreeBSD$
 .\"
-.Dd June 28, 2017
+.Dd March 5, 2018
 .Dt NETDUMPD 8
 .Os
 .Sh NAME
@@ -44,6 +44,7 @@ The
 utility listens on a UDP socket for incoming connections from a
 .Fx
 kernel core dumping over the network.
+It effectively acts as a write-only TFTP server.
 .Pp
 The following options are available:
 .Bl -tag -width indent
