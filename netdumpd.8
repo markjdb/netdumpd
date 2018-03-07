@@ -98,6 +98,12 @@ be configured to listen only to trusted networks.
 .Nm
 can be made to write an arbitrary amount of client data to a locally-mounted
 filesystem.
+.Sh EXAMPLES
+Run
+.Nm
+in the current directory, without requiring any special privileges:
+.Pp
+.Dl $ netdumpd -D -d Li . -P ./netdumpd.pid
 .Sh SEE ALSO
 .Xr netdump 4 ,
 .Xr dumpon 8
