@@ -1,6 +1,6 @@
 /*-
  * Copyright (c) 2005-2011 Sandvine Incorporated. All rights reserved.
- * Copyright (c) 2016-2017 Dell EMC
+ * Copyright (c) 2016-2018 Dell EMC
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -65,7 +65,7 @@ __FBSDID("$FreeBSD$");
 
 #include "netdumpd.h"
 
-#define	MAX_DUMPS	256	/* Maximum saved dumps per remote host. */
+#define	MAX_DUMPS	1024	/* Maximum saved dumps per remote host. */
 #define	CLIENT_TIMEOUT	600	/* Netdump timeout period, in seconds. */
 #define	CLIENT_TPASS	10	/* Scan for timed-out clients every 10s. */
 
@@ -91,16 +91,18 @@ struct netdump_pkt {
 #define	VMCORE_BUFSZ	(128 * 1024)
 
 struct netdump_client {
+	LIST_ENTRY(netdump_client) iter;
 	char		*path;
 	char		infofilename[MAXPATHLEN];
 	char		corefilename[MAXPATHLEN];
 	char		hostname[NI_MAXHOST];
 	time_t		last_msg;
-	LIST_ENTRY(netdump_client) iter;
 	struct in_addr	ip;
 	FILE		*infofile;
 	int		corefd;
+	int		keyfilefd;
 	int		sock;
+	int		index;
 	bool		any_data_rcvd;
 	ssize_t		vmcorebufoff;
 	off_t		vmcoreoff;
@@ -174,14 +176,191 @@ phook_printf(int priority, const char *message, ...)
 	va_end(ap);
 }
 
+/*
+ * Attempt to read the bounds file for the specified client. Return the saved
+ * index if possible, else return -1.
+ */
+static int
+read_index(struct netdump_client *client, const char *dir)
+{
+	char bounds[MAXPATHLEN], buf[16];
+	FILE *fp;
+	size_t len;
+	u_long bound;
+	int fd;
+
+	len = snprintf(bounds, sizeof(bounds), "%s/bounds.%s", dir,
+	    client->hostname);
+	if (len >= sizeof(bounds)) {
+		LOGERR("Truncated bounds file path: '%s'\n", bounds);
+		return (-1);
+	}
+	fd = openat(g_dumpdir_fd, bounds,
+	    O_RDONLY | O_CREAT | O_CLOEXEC, 0600);
+	if (fd < 0) {
+		LOGERR("openat(%s): %s\n", bounds, strerror(errno));
+		return (-1);
+	}
+
+	fp = fdopen(fd, "r");
+	if (fp == NULL) {
+		LOGERR_PERROR("fdopen()");
+		(void)close(fd);
+		return (-1);
+	}
+
+	if (fgets(buf, sizeof(buf), fp) == NULL) {
+		if (feof(fp))
+			LOGINFO("Empty bounds file for client %s [%s]\n",
+			    client->hostname, client_ntoa(client));
+		else
+			LOGERR("Failed to read bound for client %s [%s]: %s\n",
+			    client->hostname, client_ntoa(client),
+			    strerror(errno));
+		(void)fclose(fp);
+		return (-1);
+	}
+	(void)fclose(fp);
+
+	errno = 0;
+	bound = strtoul(buf, NULL, 10);
+	if ((bound == 0 && errno == EINVAL) ||
+	    (bound == ULONG_MAX && errno == ERANGE) ||
+	    bound > INT_MAX) {
+		LOGERR("Invalid bound for client %s [%s]: '%s'\n",
+		    client->hostname, client_ntoa(client), buf);
+		return (-1);
+	}
+	return ((int)bound);
+}
+
+static int
+write_index(struct netdump_client *client)
+{
+	char bounds[MAXPATHLEN];
+	FILE *fp;
+	size_t len;
+	int fd;
+
+	len = snprintf(bounds, sizeof(bounds), "%s/bounds.%s", client->path,
+	    client->hostname);
+	if (len >= sizeof(bounds)) {
+		LOGERR("Truncated bounds file path: '%s'\n", bounds);
+		return (-1);
+	}
+	fd = openat(g_dumpdir_fd, bounds, O_WRONLY | O_CLOEXEC);
+	if (fd < 0) {
+		LOGERR("openat(%s): %s\n", bounds, strerror(errno));
+		return (-1);
+	}
+
+	fp = fdopen(fd, "w");
+	if (fp == NULL) {
+		LOGERR_PERROR("fdopen()");
+		(void)close(fd);
+		return (-1);
+	}
+
+	(void)fprintf(fp, "%d\n", client->index + 1);
+	(void)fclose(fp);
+	return (0);
+}
+
+static int
+open_info_file(struct netdump_client *client, const char *dir, int index)
+{
+	size_t len;
+	int fd;
+
+	len = snprintf(client->infofilename, sizeof(client->infofilename),
+	    "%s/info.%s.%d", dir, client->hostname, index);
+	if (len >= sizeof(client->infofilename)) {
+		LOGERR("Truncated info file path: '%s'\n",
+		    client->infofilename);
+		return (-1);
+	}
+
+	fd = openat(g_dumpdir_fd, client->infofilename,
+	    O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+	if (fd == -1 && errno != EEXIST)
+		LOGERR("openat(\"%s\"): %s\n",
+		    client->infofilename, strerror(errno));
+	return (fd);
+}
+
+static int
+open_client_files(struct netdump_client *client, const char *dir)
+{
+	size_t len;
+	int error, fd, i, index;
+
+	index = read_index(client, dir);
+	if (index >= 0) {
+		fd = open_info_file(client, dir, index);
+		if (fd < 0) {
+			LOGERR("Incorrect bounds file for client %s [%s]\n",
+			    client->hostname, client_ntoa(client));
+			index = -1;
+		}
+	}
+	if (index == -1) {
+		for (i = 0; i < MAX_DUMPS; i++) {
+			fd = open_info_file(client, dir, i);
+			if (fd >= 0)
+				break;
+		}
+		if (i == MAX_DUMPS) {
+			LOGERR("No free index for client %s [%s]\n",
+			    client->hostname, client_ntoa(client));
+			return (-1);
+		}
+		index = i;
+	}
+	client->index = index;
+
+	client->infofile = fdopen(fd, "a");
+	if (client->infofile == NULL) {
+		LOGERR_PERROR("fdopen()");
+		(void)close(fd);
+		(void)unlinkat(g_dumpdir_fd, client->infofilename, 0);
+		return (-1);
+	}
+
+	len = snprintf(client->corefilename, sizeof(client->corefilename),
+	    "%s/vmcore.%s.%d", dir, client->hostname, i);
+	if (len >= sizeof(client->corefilename)) {
+		LOGERR("Truncated core file path: '%s'\n",
+		    client->corefilename);
+		return (-1);
+	}
+	fd = openat(g_dumpdir_fd, client->corefilename,
+	    O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+	if (fd == -1) {
+		error = errno;
+		/* Failed. Keep the numbers in sync. */
+		(void)fclose(client->infofile);
+		(void)unlinkat(g_dumpdir_fd, client->infofilename, 0);
+		client->infofile = NULL;
+		LOGERR("openat(%s): %s\n",
+		    client->corefilename, strerror(error));
+		return (-1);
+	}
+	client->corefd = fd;
+	return (0);
+}
+
+/*
+ * Allocate a bookkeeping structure for a new client. The client may, in its
+ * herald message, specify a path relative to the dumpdir in which to store the
+ * dump.
+ */
 static struct netdump_client *
 alloc_client(int sd, struct sockaddr_in *saddr, char *path)
 {
 	struct kevent event;
 	struct netdump_client *client;
 	char *firstdot, *origpath;
-	size_t len;
-	int i, error, fd, bufsz;
+	int error, bufsz;
 
 	client = calloc(1, sizeof(*client));
 	if (client == NULL) {
@@ -189,7 +368,8 @@ alloc_client(int sd, struct sockaddr_in *saddr, char *path)
 		goto error_out;
 	}
 
-	client->corefd = -1;
+	client->corefd = client->keyfilefd = -1;
+	client->index = -1;
 	client->sock = sd;
 	client->last_msg = g_now;
 	client->ip = saddr->sin_addr;
@@ -214,7 +394,7 @@ alloc_client(int sd, struct sockaddr_in *saddr, char *path)
 	}
 
 	/* It should be enough to hold approximatively twice the chunk size. */
-	bufsz = 131072;
+	bufsz = 128 * 1024;
 	if (setsockopt(client->sock, SOL_SOCKET, SO_RCVBUF, &bufsz,
 	    sizeof(bufsz))) {
 		LOGERR_PERROR("setsockopt()");
@@ -224,87 +404,36 @@ alloc_client(int sd, struct sockaddr_in *saddr, char *path)
 	}
 
 	origpath = path;
-retry:
 	if (path == NULL)
+		/* g_defpath defaults to "." */
 		path = strdup(g_defpath);
-	client->path = path;
 
-	/*
-	 * Try info.host.0 through info.host.255 in sequence. First try to
-	 * create files in the directory specified by the client, if any. If
-	 * that fails, we'll fall back to the default path.
-	 */
-	for (i = 0; i < MAX_DUMPS; i++) {
-		len = snprintf(client->infofilename,
-		    sizeof(client->infofilename),
-		    "%s/info.%s.%d", client->path, client->hostname, i);
-		if (len >= sizeof(client->infofilename)) {
-			LOGERR("Truncated info file path: '%s'\n",
-			    client->infofilename);
-			break;
-		}
-		len = snprintf(client->corefilename,
-		    sizeof(client->corefilename),
-		    "%s/vmcore.%s.%d", client->path, client->hostname, i);
-		if (len >= sizeof(client->corefilename)) {
-			LOGERR("Truncated core file path: '%s'\n",
-			    client->corefilename);
-			break;
-		}
-
-		/* Try the info file first. */
-		fd = openat(g_dumpdir_fd, client->infofilename,
-		    O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
-		if (fd == -1) {
-			if (errno != EEXIST)
-				LOGERR("openat(\"%s\"): %s\n",
-				    client->infofilename, strerror(errno));
-			continue;
-		}
-		client->infofile = fdopen(fd, "a");
-		if (client->infofile == NULL) {
-			LOGERR_PERROR("fdopen()");
-			(void)close(fd);
-			(void)unlinkat(g_dumpdir_fd, client->infofilename, 0);
-			continue;
-		}
-
-		/* Next make the core file. */
-		fd = openat(g_dumpdir_fd, client->corefilename,
-		    O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
-		if (fd == -1) {
-			/* Failed. Keep the numbers in sync. */
-			(void)fclose(client->infofile);
-			(void)unlinkat(g_dumpdir_fd, client->infofilename, 0);
-			client->infofile = NULL;
-			if (errno != EEXIST)
-				LOGERR("openat(\"%s\"): %s\n",
-				    client->corefilename, strerror(errno));
-			continue;
-		}
-		client->corefd = fd;
-		break;
-	}
-
-	if (client->infofile == NULL || client->corefd == -1) {
+	error = open_client_files(client, path);
+	if (error != 0) {
 		if (origpath != NULL) {
 			LOGWARN(
-    "Can't create output files in path for client %s, retrying with default\n",
-			    client->hostname);
+"Can't create output files in path for client %s [%s], retrying with default\n",
+			    client->hostname, client_ntoa(client));
 			free(origpath);
-			origpath = path = NULL;
-			goto retry;
+			path = strdup(g_defpath);
+			error = open_client_files(client, path);
 		}
-		LOGERR("Can't create output files for new client %s [%s]\n",
-		    client->hostname, client_ntoa(client));
-		goto error_out;
+		if (error != 0) {
+			LOGERR(
+		    "Can't create output files for new client %s [%s]\n",
+			    client->hostname, client_ntoa(client));
+			goto error_out;
+		}
 	}
+	client->path = path;
 
 	EV_SET(&event, client->sock, EVFILT_READ, EV_ADD, 0, 0, client);
 	if (kevent(g_kq, &event, 1, NULL, 0, NULL) != 0) {
 		LOGERR_PERROR("kevent(EV_ADD)");
 		goto error_out;
 	}
+
+	(void)write_index(client);
 
 	LIST_INSERT_HEAD(&g_clients, client, iter);
 	return (client);
@@ -334,9 +463,11 @@ free_client(struct netdump_client *client)
 
 	/* Remove from the list.  Ignore errors from close() routines. */
 	LIST_REMOVE(client, iter);
-	fclose(client->infofile);
-	close(client->corefd);
-	close(client->sock);
+	if (client->keyfilefd != -1)
+		(void)close(client->keyfilefd);
+	(void)fclose(client->infofile);
+	(void)close(client->corefd);
+	(void)close(client->sock);
 	free(client->path);
 	free(client);
 }
@@ -424,7 +555,7 @@ static void
 handle_kdh(struct netdump_client *client, struct netdump_pkt *pkt)
 {
 #if KERNELDUMPVERSION >= 3
-	const char *const compalgos[] = {
+	static const char *const compalgos[] = {
 	    [KERNELDUMP_COMP_NONE] = "none",
 	    [KERNELDUMP_COMP_GZIP] = "gzip",
 #ifdef KERNELDUMP_COMP_ZSTD
@@ -432,55 +563,143 @@ handle_kdh(struct netdump_client *client, struct netdump_pkt *pkt)
 #endif
 	    NULL,
 	};
+	static const char *const suffixes[] = {
+	    [KERNELDUMP_COMP_GZIP] = ".gz",
+#ifdef KERNELDUMP_COMP_ZSTD
+	    [KERNELDUMP_COMP_ZSTD] = ".zst",
 #endif
-	const char *algo;
-	time_t t;
+	};
+#endif /* KERNELDUMPVERSION >= 3 */
+	char newpath[MAXPATHLEN];
+	struct kerneldumpheader *kdh;
+	const char *compalgo;
 	uint64_t dumplen;
-	struct kerneldumpheader *h;
+	time_t t;
 	int parity_check;
 
 	client->any_data_rcvd = true;
-	h = (struct kerneldumpheader *)(void *)pkt->data;
+
+	LOGINFO("(KDH from %s [%s])\n", client->hostname, client_ntoa(client));
+	send_ack(client, pkt->hdr.mh_seqno);
+
 	if (pkt->hdr.mh_len < sizeof(struct kerneldumpheader)) {
 		LOGERR("Bad KDH from %s [%s]: packet too small\n",
 		    client->hostname, client_ntoa(client));
 		client_pinfo(client, "Bad KDH: packet too small\n");
-		fflush(client->infofile);
 		return;
 	}
-	parity_check = kerneldump_parity(h);
+
+	kdh = (struct kerneldumpheader *)(void *)pkt->data;
+
+	parity_check = kerneldump_parity(kdh);
 
 	/* Make sure all the strings are null-terminated. */
-	h->architecture[sizeof(h->architecture) - 1] = '\0';
-	h->hostname[sizeof(h->hostname) - 1] = '\0';
-	h->versionstring[sizeof(h->versionstring) - 1] = '\0';
-	h->panicstring[sizeof(h->panicstring) - 1] = '\0';
+	kdh->architecture[sizeof(kdh->architecture) - 1] = '\0';
+	kdh->hostname[sizeof(kdh->hostname) - 1] = '\0';
+	kdh->versionstring[sizeof(kdh->versionstring) - 1] = '\0';
+	kdh->panicstring[sizeof(kdh->panicstring) - 1] = '\0';
 
-#if KERNELDUMPVERSION >= 3
-	if (h->compression < nitems(compalgos))
-		algo = compalgos[h->compression];
-	else
-		algo = "???";
-#endif
-
-	client_pinfo(client, "  Architecture: %s\n", h->architecture);
+	client_pinfo(client, "  Architecture: %s\n", kdh->architecture);
 	client_pinfo(client, "  Architecture version: %d\n",
-	    dtoh32(h->architectureversion));
-	dumplen = dtoh64(h->dumplength);
+	    dtoh32(kdh->architectureversion));
+	dumplen = dtoh64(kdh->dumplength);
 	client_pinfo(client, "  Dump length: %lldB (%lld MB)\n",
 	    (long long)dumplen, (long long)(dumplen >> 20));
-	client_pinfo(client, "  Blocksize: %d\n", dtoh32(h->blocksize));
-	t = dtoh64(h->dumptime);
-	client_pinfo(client, "  Compression: %s\n", algo);
+	client_pinfo(client, "  Blocksize: %d\n", dtoh32(kdh->blocksize));
+	t = dtoh64(kdh->dumptime);
+#if KERNELDUMPVERSION >= 3
+	if (kdh->compression < nitems(compalgos))
+		compalgo = compalgos[kdh->compression];
+	else
+		compalgo = "???";
+	client_pinfo(client, "  Compression: %s\n", compalgo);
+#endif
 	client_pinfo(client, "  Dumptime: %s", ctime(&t));
-	client_pinfo(client, "  Hostname: %s\n", h->hostname);
-	client_pinfo(client, "  Versionstring: %s", h->versionstring);
-	client_pinfo(client, "  Panicstring: %s\n", h->panicstring);
+	client_pinfo(client, "  Hostname: %s\n", kdh->hostname);
+	client_pinfo(client, "  Versionstring: %s", kdh->versionstring);
+	client_pinfo(client, "  Panicstring: %s\n", kdh->panicstring);
 	client_pinfo(client, "  Header parity check: %s\n",
 	    parity_check ? "Fail" : "Pass");
 	fflush(client->infofile);
 
-	LOGINFO("(KDH from %s [%s])", client->hostname, client_ntoa(client));
+#if KERNELDUMPVERSION >= 3
+	/*
+	 * Rename the dump file so that it has the correct suffix, and truncate
+	 * it to the correct size. The kernel dump code always writes in
+	 * multiples of the block size, so the resulting file size will be
+	 * rounded up to the next multiple. The trailing bytes confuse
+	 * decompressors, so chop them off now. This is a bit of a hack, but so
+	 * it goes.
+	 */
+	if (kdh->compression < nitems(compalgos) &&
+	    kdh->compression != KERNELDUMP_COMP_NONE) {
+		(void)strlcpy(newpath, client->corefilename, sizeof(newpath));
+		if (strlcat(newpath, suffixes[kdh->compression],
+		    sizeof(newpath)) < sizeof(newpath)) {
+			renameat(g_dumpdir_fd, client->corefilename,
+			    g_dumpdir_fd, newpath);
+			(void)strlcpy(client->corefilename, newpath,
+			    sizeof(client->corefilename));
+		} else
+			LOGWARN("Couldn't append compression suffix to '%s'\n",
+			    client->corefilename);
+
+		if (vmcore_flush(client) == 0 &&
+		    ftruncate(client->corefd, dumplen) != 0)
+			/* Not fatal. */
+			LOGERR_PERROR("ftruncate()");
+	}
+#endif
+}
+
+static void
+handle_ekcd_key(struct netdump_client *client, struct netdump_pkt *pkt)
+{
+	char *data;
+	size_t n;
+	uint32_t bytes, offset;
+	int fd;
+
+	if (client->keyfilefd == -1) {
+		char keyfile[MAXPATHLEN];
+		size_t len;
+
+		len = snprintf(keyfile, sizeof(keyfile), "%s/key.%s.%d",
+		    client->path, client->hostname, client->index);
+		if (len >= sizeof(keyfile)) {
+			LOGERR(
+			    "Truncated key file path for client %s [%s]: %s\n",
+			    client->hostname, client_ntoa(client), keyfile);
+			return;
+		}
+
+		fd = openat(g_dumpdir_fd, keyfile,
+		    O_WRONLY | O_CREAT | O_CLOEXEC, 0400);
+		if (fd < 0) {
+			LOGERR_PERROR("openat()");
+			return;
+		}
+		client->keyfilefd = fd;
+
+		LOGINFO("(EKCD key from %s [%s])\n",
+		    client->hostname, client_ntoa(client));
+	} else
+		fd = client->keyfilefd;
+
+	bytes = pkt->hdr.mh_len;
+	data = pkt->data;
+	offset = pkt->hdr.mh_offset;
+	do {
+		n = pwrite(fd, data, bytes, offset);
+		if (n < 0) {
+			LOGERR_PERROR("write()");
+			return;
+		}
+		bytes -= n;
+		data += n;
+		offset += n;
+	} while (bytes > 0);
+
 	send_ack(client, pkt->hdr.mh_seqno);
 }
 
@@ -505,6 +724,10 @@ handle_vmcore(struct netdump_client *client, struct netdump_pkt *pkt)
 		if (vmcore_flush(client) != 0)
 			return;
 
+	/*
+	 * Buffer vmcore contents. This greatly improves throughput over
+	 * simply writing each packet's contents directly.
+	 */
 	memcpy(client->vmcorebuf + client->vmcorebufoff, pkt->data,
 	    pkt->hdr.mh_len);
 	if (client->vmcorebufoff == 0)
@@ -522,7 +745,9 @@ handle_finish(struct netdump_client *client, struct netdump_pkt *pkt)
 	/* Make sure we commit any buffered vmcore data. */
 	if (vmcore_flush(client) != 0)
 		return;
-	(void)fsync(client->corefd);
+	if (fsync(client->corefd) != 0)
+		/* Not fatal. */
+		LOGERR_PERROR("fsync()");
 
 	/* Create symlinks to the new vmcore and info files. */
 	snprintf(symlinkpath, sizeof(symlinkpath), "%s/vmcore.%s.last",
@@ -555,7 +780,7 @@ handle_finish(struct netdump_client *client, struct netdump_pkt *pkt)
 	}
 	free(symlinktarget);
 
-	LOGINFO("\nCompleted dump from client %s [%s]\n", client->hostname,
+	LOGINFO("Completed dump from client %s [%s]\n", client->hostname,
 	    client_ntoa(client));
 	client_pinfo(client, "Dump complete\n");
 	send_ack(client, pkt->hdr.mh_seqno);
@@ -642,6 +867,9 @@ client_event(struct netdump_client *client)
 	switch (pkt.hdr.mh_type) {
 	case NETDUMP_KDH:
 		handle_kdh(client, &pkt);
+		break;
+	case NETDUMP_EKCD_KEY:
+		handle_ekcd_key(client, &pkt);
 		break;
 	case NETDUMP_VMCORE:
 		handle_vmcore(client, &pkt);
@@ -765,8 +993,9 @@ init_cap_mode(void)
 	}
 
 	/* CAP_FCNTL is needed by fdopen(3). */
-	cap_rights_init(&rights, CAP_CREATE, CAP_FCNTL, CAP_PWRITE, CAP_READ,
-	    CAP_SYMLINKAT, CAP_UNLINKAT);
+	cap_rights_init(&rights, CAP_CREATE, CAP_FCNTL, CAP_FTRUNCATE,
+	    CAP_FSYNC, CAP_PWRITE, CAP_READ, CAP_RENAMEAT_SOURCE,
+	    CAP_RENAMEAT_TARGET, CAP_SYMLINKAT, CAP_UNLINKAT);
 	if (cap_rights_limit(g_dumpdir_fd, &rights) != 0) {
 		LOGERR_PERROR("cap_rights_limit()");
 		goto err;

@@ -44,6 +44,7 @@
 #define	NETDUMP_FINISHED	2	/* Send after finishing a dump. */
 #define	NETDUMP_VMCORE		3	/* Contains dump data. */
 #define	NETDUMP_KDH		4	/* Contains kernel dump header. */
+#define	NETDUMP_EKCD_KEY	5
 
 #define	NETDUMP_DATASIZE	4096	/* Arbitrary packet size limit. */
 
