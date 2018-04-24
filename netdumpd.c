@@ -569,10 +569,10 @@ handle_kdh(struct netdump_client *client, struct netdump_pkt *pkt)
 	    [KERNELDUMP_COMP_ZSTD] = ".zst",
 #endif
 	};
-#endif /* KERNELDUMPVERSION >= 3 */
 	char newpath[MAXPATHLEN];
-	struct kerneldumpheader *kdh;
 	const char *compalgo;
+#endif /* KERNELDUMPVERSION >= 3 */
+	struct kerneldumpheader *kdh;
 	uint64_t dumplen;
 	time_t t;
 	int parity_check;
@@ -656,7 +656,7 @@ static void
 handle_ekcd_key(struct netdump_client *client, struct netdump_pkt *pkt)
 {
 	char *data;
-	size_t n;
+	ssize_t n;
 	uint32_t bytes, offset;
 	int fd;
 
