@@ -292,7 +292,7 @@ static int
 open_client_files(struct netdump_client *client, const char *dir)
 {
 	size_t len;
-	int error, fd, i, index;
+	int error, fd, index;
 
 	index = read_index(client, dir);
 	if (index >= 0) {
@@ -304,17 +304,16 @@ open_client_files(struct netdump_client *client, const char *dir)
 		}
 	}
 	if (index == -1) {
-		for (i = 0; i < MAX_DUMPS; i++) {
-			fd = open_info_file(client, dir, i);
+		for (index = 0; index < MAX_DUMPS; index++) {
+			fd = open_info_file(client, dir, index);
 			if (fd >= 0)
 				break;
 		}
-		if (i == MAX_DUMPS) {
+		if (index == MAX_DUMPS) {
 			LOGERR("No free index for client %s [%s]\n",
 			    client->hostname, client_ntoa(client));
 			return (-1);
 		}
-		index = i;
 	}
 	client->index = index;
 
@@ -327,7 +326,7 @@ open_client_files(struct netdump_client *client, const char *dir)
 	}
 
 	len = snprintf(client->corefilename, sizeof(client->corefilename),
-	    "%s/vmcore.%s.%d", dir, client->hostname, i);
+	    "%s/vmcore.%s.%d", dir, client->hostname, client->index);
 	if (len >= sizeof(client->corefilename)) {
 		LOGERR("Truncated core file path: '%s'\n",
 		    client->corefilename);
@@ -569,9 +568,13 @@ handle_kdh(struct netdump_client *client, struct netdump_pkt *pkt)
 	    [KERNELDUMP_COMP_ZSTD] = ".zst",
 #endif
 	};
-	char newpath[MAXPATHLEN];
 	const char *compalgo;
 #endif /* KERNELDUMPVERSION >= 3 */
+#if KERNELDUMPVERSION >= 2
+	char newpath[MAXPATHLEN];
+	char *p;
+	int limit;
+#endif
 	struct kerneldumpheader *kdh;
 	uint64_t dumplen;
 	time_t t;
@@ -608,11 +611,13 @@ handle_kdh(struct netdump_client *client, struct netdump_pkt *pkt)
 	client_pinfo(client, "  Blocksize: %d\n", dtoh32(kdh->blocksize));
 	t = dtoh64(kdh->dumptime);
 #if KERNELDUMPVERSION >= 3
-	if (kdh->compression < nitems(compalgos))
-		compalgo = compalgos[kdh->compression];
-	else
-		compalgo = "???";
-	client_pinfo(client, "  Compression: %s\n", compalgo);
+	if (kdh->version >= 3) {
+		if (kdh->compression < nitems(compalgos))
+			compalgo = compalgos[kdh->compression];
+		else
+			compalgo = "???";
+		client_pinfo(client, "  Compression: %s\n", compalgo);
+	}
 #endif
 	client_pinfo(client, "  Dumptime: %s", ctime(&t));
 	client_pinfo(client, "  Hostname: %s\n", kdh->hostname);
@@ -622,6 +627,30 @@ handle_kdh(struct netdump_client *client, struct netdump_pkt *pkt)
 	    parity_check ? "Fail" : "Pass");
 	fflush(client->infofile);
 
+#if KERNELDUMPVERSION >= 2
+	if (kdh->version >= 2 && kdh->dumpkeysize > 0) {
+		(void)strlcpy(newpath, client->corefilename, sizeof(newpath));
+		p = strrchr(newpath, '/');
+		if (p == NULL ||
+		    strncmp(p + 1, "vmcore.", 7) != 0)
+			LOGWARN("Corrupted core file path '%s'\n",
+			    client->corefilename);
+		else {
+			p++;
+			limit = sizeof(newpath) - (p - &newpath[0]);
+			if (snprintf(p, limit, "vmcore_encrypted.%s.%d",
+			    client->hostname, client->index) < limit) {
+				renameat(g_dumpdir_fd, client->corefilename,
+				    g_dumpdir_fd, newpath);
+				(void)strlcpy(client->corefilename, newpath,
+				    sizeof(client->corefilename));
+			} else
+				LOGWARN(
+			    "Couldn't append encryption suffix to '%s'\n",
+				    client->corefilename);
+		}
+	}
+#endif
 #if KERNELDUMPVERSION >= 3
 	/*
 	 * Rename the dump file so that it has the correct suffix, and truncate
@@ -631,7 +660,7 @@ handle_kdh(struct netdump_client *client, struct netdump_pkt *pkt)
 	 * decompressors, so chop them off now. This is a bit of a hack, but so
 	 * it goes.
 	 */
-	if (kdh->compression < nitems(compalgos) &&
+	if (kdh->version >= 3 && kdh->compression < nitems(compalgos) &&
 	    kdh->compression != KERNELDUMP_COMP_NONE) {
 		(void)strlcpy(newpath, client->corefilename, sizeof(newpath));
 		if (strlcat(newpath, suffixes[kdh->compression],
