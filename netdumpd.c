@@ -499,17 +499,31 @@ handle_timeout(struct netdump_client *client)
 static int
 vmcore_flush(struct netdump_client *client)
 {
+	ssize_t len, n;
+	off_t off;
+	int error;
 
-	if (pwrite(client->corefd, client->vmcorebuf, client->vmcorebufoff,
-	    client->vmcoreoff) != client->vmcorebufoff) {
-		LOGERR("pwrite (for client %s [%s]): %s\n", client->hostname,
-		    client_ntoa(client), strerror(errno));
-		client_pinfo(client,
+	len = client->vmcorebufoff;
+	off = 0;
+	while (len > 0) {
+		n = pwrite(client->corefd, client->vmcorebuf + off, len,
+		    client->vmcoreoff + off);
+		if (n < 0) {
+			error = errno;
+			LOGERR("pwrite (for client %s [%s]): %s\n",
+			    client->hostname, client_ntoa(client),
+			    strerror(errno));
+			if (error == EINTR)
+				continue;
+			client_pinfo(client,
 		    "Dump unsuccessful: write error @ offset %08jx: %s\n",
-		    (uintmax_t)client->vmcoreoff, strerror(errno));
-		exec_handler(client, "error");
-		free_client(client);
-		return (1);
+			    (uintmax_t)off, strerror(errno));
+			exec_handler(client, "error");
+			free_client(client);
+			return (1);
+		}
+		len -= n;
+		off += n;
 	}
 	client->vmcorebufoff = 0;
 	return (0);
