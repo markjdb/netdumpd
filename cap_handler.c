@@ -24,6 +24,7 @@
  */
 
 #include <sys/param.h>
+#include <sys/dnv.h>
 #include <sys/nv.h>
 
 #include <netinet/netdump/netdump.h>
@@ -68,9 +69,7 @@ netdump_cap_handler(cap_channel_t *cap, const char *reason, const char *ip,
 	if (nvl == NULL)
 		return (errno);
 
-	error = 0;
-	if (nvlist_exists_number(nvl, "error"))
-		error = (int)nvlist_get_number(nvl, "error");
+	error = (int)dnvlist_get_number(nvl, "error", 0);
 	nvlist_destroy(nvl);
 	return (error);
 }
