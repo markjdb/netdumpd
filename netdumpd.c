@@ -1044,14 +1044,6 @@ init_cap_mode(void)
 		goto err;
 	}
 
-	/* CAP_FCNTL is needed by fdopen(3). */
-	cap_rights_init(&rights, CAP_CREATE, CAP_FCNTL, CAP_FTRUNCATE,
-	    CAP_FSYNC, CAP_PWRITE, CAP_READ, CAP_RENAMEAT_SOURCE,
-	    CAP_RENAMEAT_TARGET, CAP_SYMLINKAT, CAP_UNLINKAT);
-	if (cap_rights_limit(g_dumpdir_fd, &rights) != 0) {
-		LOGERR_PERROR("cap_rights_limit()");
-		goto err;
-	}
 	cap_rights_init(&rights, CAP_SEND, CAP_RECV);
 	if (cap_rights_limit(g_sock, &rights) != 0) {
 		LOGERR_PERROR("cap_rights_limit()");
