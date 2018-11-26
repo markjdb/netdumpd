@@ -65,6 +65,7 @@ __FBSDID("$FreeBSD$");
 #include <libutil.h>
 
 #include "netdumpd.h"
+#include "kerneldump_compat.h"
 
 #define	MAX_DUMPS	1024	/* Maximum saved dumps per remote host. */
 #define	CLIENT_TIMEOUT	600	/* Netdump timeout period, in seconds. */
