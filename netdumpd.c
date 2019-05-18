@@ -1057,7 +1057,11 @@ init_cap_mode(void)
 		goto err;
 	}
 	limits = nvlist_create(0);
+#if __FreeBSD_version < 1300000
 	nvlist_add_string(limits, "type", "NAME");
+#else
+	nvlist_add_string(limits, "type", "ADDR2NAME");
+#endif
 	nvlist_add_number(limits, "family", (uint64_t)AF_INET);
 	if (cap_limit_set(g_capdns, limits) != 0) {
 		LOGERR_PERROR("cap_limit_set(system.dns)");
