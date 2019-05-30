@@ -553,7 +553,7 @@ send_ack(struct netdump_client *client, uint32_t seqno)
 {
 	struct netdump_ack ack;
 
-	bzero(&ack, sizeof(ack));
+	memset(&ack, 0, sizeof(ack));
 	ack.na_seqno = htonl(seqno);
 
 	if (send(client->sock, &ack, sizeof(ack), 0) == -1)
