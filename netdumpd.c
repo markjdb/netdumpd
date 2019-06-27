@@ -619,10 +619,10 @@ handle_kdh(struct netdump_client *client, struct netdump_pkt *pkt)
 	kdh->panicstring[sizeof(kdh->panicstring) - 1] = '\0';
 
 	client_pinfo(client, "  Architecture: %s\n", kdh->architecture);
-	client_pinfo(client, "  Architecture version: %d\n",
+	client_pinfo(client, "  Architecture Version: %d\n",
 	    dtoh32(kdh->architectureversion));
 	dumplen = dtoh64(kdh->dumplength);
-	client_pinfo(client, "  Dump length: %lldB (%lld MB)\n",
+	client_pinfo(client, "  Dump Length: %lldB (%lld MB)\n",
 	    (long long)dumplen, (long long)(dumplen >> 20));
 	client_pinfo(client, "  Blocksize: %d\n", dtoh32(kdh->blocksize));
 	t = dtoh64(kdh->dumptime);
@@ -637,9 +637,9 @@ handle_kdh(struct netdump_client *client, struct netdump_pkt *pkt)
 #endif
 	client_pinfo(client, "  Dumptime: %s", ctime(&t));
 	client_pinfo(client, "  Hostname: %s\n", kdh->hostname);
-	client_pinfo(client, "  Versionstring: %s", kdh->versionstring);
-	client_pinfo(client, "  Panicstring: %s\n", kdh->panicstring);
-	client_pinfo(client, "  Header parity check: %s\n",
+	client_pinfo(client, "  Version String: %s", kdh->versionstring);
+	client_pinfo(client, "  Panic String: %s\n", kdh->panicstring);
+	client_pinfo(client, "  Header Parity Check: %s\n",
 	    parity_check ? "Fail" : "Pass");
 	fflush(client->infofile);
 
