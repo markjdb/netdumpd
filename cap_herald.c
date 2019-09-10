@@ -77,7 +77,7 @@ netdump_cap_herald(cap_channel_t *cap, int *nsd, struct sockaddr_in *sin,
 	if (nvl == NULL)
 		return (errno);
 
-	error = (int)dnvlist_get_number(nvl, "errror", 0);
+	error = (int)dnvlist_get_number(nvl, "error", 0);
 	if (error != 0)
 		goto out;
 
