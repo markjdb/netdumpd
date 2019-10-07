@@ -1057,7 +1057,7 @@ init_cap_mode(void)
 		goto err;
 	}
 	limits = nvlist_create(0);
-#if __FreeBSD_version < 1300000
+#if __FreeBSD_version < 1201000
 	nvlist_add_string(limits, "type", "NAME");
 #else
 	nvlist_add_string(limits, "type", "ADDR2NAME");
