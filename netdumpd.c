@@ -269,13 +269,13 @@ write_index(struct netdump_client *client)
 }
 
 static int
-open_info_file(struct netdump_client *client, const char *dir, int index)
+open_info_file(struct netdump_client *client, const char *dir, int idx)
 {
 	size_t len;
 	int fd;
 
 	len = snprintf(client->infofilename, sizeof(client->infofilename),
-	    "%s/info.%s.%d", dir, client->hostname, index);
+	    "%s/info.%s.%d", dir, client->hostname, idx);
 	if (len >= sizeof(client->infofilename)) {
 		LOGERR("Truncated info file path: '%s'\n",
 		    client->infofilename);
@@ -294,30 +294,31 @@ static int
 open_client_files(struct netdump_client *client, const char *dir)
 {
 	size_t len;
-	int error, fd, index;
+	int error, fd, idx;
 
-	index = read_index(client, dir);
-	if (index >= 0) {
-		fd = open_info_file(client, dir, index);
+	fd = -1;
+	idx = read_index(client, dir);
+	if (idx >= 0) {
+		fd = open_info_file(client, dir, idx);
 		if (fd < 0) {
 			LOGERR("Incorrect bounds file for client %s [%s]\n",
 			    client->hostname, client_ntoa(client));
-			index = -1;
+			idx = -1;
 		}
 	}
-	if (index == -1) {
-		for (index = 0; index < MAX_DUMPS; index++) {
-			fd = open_info_file(client, dir, index);
+	if (idx == -1) {
+		for (idx = 0; idx < MAX_DUMPS; idx++) {
+			fd = open_info_file(client, dir, idx);
 			if (fd >= 0)
 				break;
 		}
-		if (index == MAX_DUMPS) {
+		if (idx == MAX_DUMPS) {
 			LOGERR("No free index for client %s [%s]\n",
 			    client->hostname, client_ntoa(client));
 			return (-1);
 		}
 	}
-	client->index = index;
+	client->index = idx;
 
 	client->infofile = fdopen(fd, "a");
 	if (client->infofile == NULL) {
