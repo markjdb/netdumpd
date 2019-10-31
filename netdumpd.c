@@ -784,10 +784,30 @@ handle_vmcore(struct netdump_client *client, struct netdump_pkt *pkt)
 }
 
 static void
-handle_finish(struct netdump_client *client, struct netdump_pkt *pkt)
+symlink_client_file(struct netdump_client *client, const char *file)
 {
 	char symlinkpath[MAXPATHLEN], *symlinktarget;
+	size_t len;
 
+	len = snprintf(symlinkpath, sizeof(symlinkpath), "%s/%s.%s.last",
+	    client->path, file, client->hostname);
+	if (len >= sizeof(symlinkpath)) {
+		LOGWARN("client %s file path is too long");
+		return;
+	}
+	if (unlinkat(g_dumpdir_fd, symlinkpath, 0) != 0 && errno != ENOENT) {
+		LOGERR_PERROR("unlinkat()");
+		return;
+	}
+	symlinktarget = strdup(client->corefilename);
+	if (symlinkat(basename(symlinktarget), g_dumpdir_fd, symlinkpath) != 0)
+		LOGERR_PERROR("symlink()");
+	free(symlinktarget);
+}
+
+static void
+handle_finish(struct netdump_client *client, struct netdump_pkt *pkt)
+{
 	/* Make sure we commit any buffered vmcore data. */
 	if (vmcore_flush(client) != 0)
 		return;
@@ -796,35 +816,8 @@ handle_finish(struct netdump_client *client, struct netdump_pkt *pkt)
 		LOGERR_PERROR("fsync()");
 
 	/* Create symlinks to the new vmcore and info files. */
-	snprintf(symlinkpath, sizeof(symlinkpath), "%s/vmcore.%s.last",
-	    client->path, client->hostname);
-	if (unlinkat(g_dumpdir_fd, symlinkpath, 0) != 0 && errno != ENOENT) {
-		LOGERR_PERROR("unlinkat()");
-		return;
-	}
-	symlinktarget = strdup(client->corefilename);
-	if (symlinkat(basename(symlinktarget), g_dumpdir_fd,
-	    symlinkpath) != 0) {
-		LOGERR_PERROR("symlink()");
-		free(symlinktarget);
-		return;
-	}
-	free(symlinktarget);
-
-	snprintf(symlinkpath, sizeof(symlinkpath), "%s/info.%s.last",
-	    client->path, client->hostname);
-	if (unlinkat(g_dumpdir_fd, symlinkpath, 0) != 0 && errno != ENOENT) {
-		LOGERR_PERROR("unlinkat()");
-		return;
-	}
-	symlinktarget = strdup(client->infofilename);
-	if (symlinkat(basename(symlinktarget), g_dumpdir_fd,
-	    symlinkpath) != 0) {
-		LOGERR_PERROR("symlink()");
-		free(symlinktarget);
-		return;
-	}
-	free(symlinktarget);
+	symlink_client_file(client, "vmcore");
+	symlink_client_file(client, "info");
 
 	LOGINFO("Completed dump from client %s [%s]\n", client->hostname,
 	    client_ntoa(client));
