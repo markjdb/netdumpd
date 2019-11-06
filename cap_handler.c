@@ -26,6 +26,7 @@
 #include <sys/param.h>
 #include <sys/dnv.h>
 #include <sys/nv.h>
+#include <sys/procdesc.h>
 
 #include <netinet/netdump/netdump.h>
 
@@ -52,7 +53,7 @@ netdump_cap_handler(cap_channel_t *cap, const char *reason, const char *ip,
     const char *hostname, const char *infofile, const char *corefile)
 {
 	nvlist_t *nvl;
-	int error;
+	int error, pd;
 
 	nvl = nvlist_create(0);
 	nvlist_add_string(nvl, "cmd", "exec_handler");
@@ -67,24 +68,36 @@ netdump_cap_handler(cap_channel_t *cap, const char *reason, const char *ip,
 	nvl = cap_xfer_nvlist(cap, nvl, 0);
 #endif
 	if (nvl == NULL)
-		return (errno);
+		return (-1);
 
 	error = (int)dnvlist_get_number(nvl, "error", 0);
+	pd = dnvlist_take_descriptor(nvl, "procdesc", -1);
 	nvlist_destroy(nvl);
-	return (error);
+
+	if (error != 0) {
+		if (pd != -1) {
+			(void)close(pd);
+			pd = -1;
+		}
+		errno = error;
+	}
+	return (pd);
 }
 
 static int
 handler_command(const char *cmd, const nvlist_t *limits, nvlist_t *nvlin,
-    nvlist_t *nvlout __unused)
+    nvlist_t *nvlout)
 {
 	const char *argv[7], *script;
 	pid_t pid;
+	int pd;
 
 	if (strcmp(cmd, "exec_handler") != 0)
 		return (EINVAL);
+	if (limits == NULL)
+		return (ENOTCAPABLE);
 
-	if ((pid = fork()) < 0)
+	if ((pid = pdfork(&pd, PD_CLOEXEC)) < 0)
 		return (errno);
 	if (pid == 0) {
 		script = nvlist_get_string(limits, "handler_script");
@@ -99,6 +112,7 @@ handler_command(const char *cmd, const nvlist_t *limits, nvlist_t *nvlin,
 		(void)execve(script, __DECONST(char *const *, argv), NULL);
 		_exit(1);
 	}
+	nvlist_move_descriptor(nvlout, "procdesc", pd);
 	return (0);
 }
 

@@ -34,6 +34,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/event.h>
 #include <sys/kerneldump.h>
 #include <sys/nv.h>
+#include <sys/procdesc.h>
 #include <sys/queue.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -477,14 +478,21 @@ free_client(struct netdump_client *client)
 static void
 exec_handler(struct netdump_client *client, const char *reason)
 {
-	int error;
+	struct kevent ev;
+	int pd;
 
 	if (g_caphandler == NULL)
 		return;
-	error = netdump_cap_handler(g_caphandler, reason, client_ntoa(client),
+	pd = netdump_cap_handler(g_caphandler, reason, client_ntoa(client),
 	    client->hostname, client->infofilename, client->corefilename);
-	if (error != 0)
-		LOGERR("netdump_cap_handler(): %s", strerror(error));
+	if (pd < 0)
+		LOGERR("netdump_cap_handler(): %m");
+	EV_SET(&ev, pd, EVFILT_PROCDESC, EV_ADD, NOTE_EXIT, 0, NULL);
+	if (kevent(g_kq, &ev, 1, NULL, 0, NULL) != 0) {
+		LOGERR_PERROR("kevent(procdesc)");
+		/* There is not much we can do aside from kill the process. */
+		(void)close(pd);
+	}
 }
 
 static void
@@ -924,11 +932,48 @@ client_event(struct netdump_client *client)
 }
 
 static int
+handle_event(struct kevent *ev)
+{
+	pid_t pid;
+	int pd, status;
+
+	switch (ev->filter) {
+	case EVFILT_SIGNAL:
+		/* We received SIGINT or SIGTERM. */
+		return (-1);
+	case EVFILT_READ:
+		if ((int)ev->ident == g_sock)
+			server_event();
+		else
+			client_event((struct netdump_client *)ev->udata);
+		break;
+	case EVFILT_PROCDESC:
+		pd = (int)ev->ident;
+		if (pdgetpid(pd, &pid) != 0) {
+			LOGERR_PERROR("pdgetpid()");
+			break;
+		}
+		status = ev->data;
+		if (status == 0)
+			LOGINFO("Process %d exited with status 0\n", pid);
+		else
+			LOGWARN("Process %d exited with status %d\n", pid,
+			    status);
+		(void)close(pd);
+		break;
+	default:
+		LOGERR("unexpected event %d", ev->filter);
+		break;
+	}
+
+	return (0);
+}
+
+static int
 eventloop(void)
 {
 	struct kevent events[8];
 	struct timespec ts;
-	struct netdump_client *client;
 	int ev, rc;
 
 	LOGINFO("Waiting for clients.\n");
@@ -947,24 +992,9 @@ eventloop(void)
 		}
 
 		g_now = time(NULL);
-		for (ev = 0; ev < rc; ev++) {
-			if (events[ev].filter == EVFILT_SIGNAL)
-				/* We received SIGINT or SIGTERM. */
+		for (ev = 0; ev < rc; ev++)
+			if (handle_event(&events[ev]) != 0)
 				goto out;
-
-			if (events[ev].filter == EVFILT_READ) {
-				if ((int)events[ev].ident == g_sock)
-					server_event();
-				else {
-					client = events[ev].udata;
-					client_event(client);
-				}
-				continue;
-			}
-
-			LOGERR("unexpected event %d", events[ev].filter);
-			break;
-		}
 
 		timeout_clients();
 	}
