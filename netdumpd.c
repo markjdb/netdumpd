@@ -61,10 +61,10 @@ __FBSDID("$FreeBSD$");
 #include <unistd.h>
 
 #include <libcasper.h>
-#include <casper/cap_dns.h>
 
 #include <libutil.h>
 
+#include "cap_dns.h"
 #include "netdumpd.h"
 #include "kerneldump_compat.h"
 
@@ -1028,17 +1028,17 @@ get_script_option(void)
 }
 
 /*
- * Enter capability mode. This effectively sandboxes netdumpd by restricting its
- * ability to acquire new rights. In particular, capability mode enforces
+ * Enter capability mode.  This effectively sandboxes netdumpd by restricting
+ * its ability to acquire new rights.  In particular, capability mode enforces
  * restrictions on the dump path specified by a client: such paths are not
  * allowed to contain a '..' component or to follow a symlink containing '..'.
  *
  * Some operations that we need to perform after this point cannot be executed
- * in capability mode, so a few libcasper services are used. system.dns lets us
- * perform reverse lookups of client addresses, netdumpd.herald handles incoming
- * netdump requests and creates sockets for them, and netdumpd.handler is used
- * to execute a pre-defined script upon completion (successful or otherwise) of
- * a netdump.
+ * in capability mode, so a few libcasper services are used.  netdumpd.dns lets
+ * us perform reverse lookups of client addresses, netdumpd.herald handles
+ * incoming netdump requests and creates sockets for them, and netdumpd.handler
+ * is used to execute a pre-defined script upon completion (successful or
+ * otherwise) of a netdump.
  */
 static int
 init_cap_mode(void)
@@ -1075,20 +1075,16 @@ init_cap_mode(void)
 		goto err;
 	}
 
-	g_capdns = cap_service_open(capcasper, "system.dns");
+	g_capdns = cap_service_open(capcasper, "netdumpd.dns");
 	if (g_capdns == NULL) {
-		LOGERR_PERROR("cap_service_open(system.dns)");
+		LOGERR_PERROR("cap_service_open(netdumpd.dns)");
 		goto err;
 	}
 	limits = nvlist_create(0);
-#if __FreeBSD_version < 1201000
-	nvlist_add_string(limits, "type", "NAME");
-#else
 	nvlist_add_string(limits, "type", "ADDR2NAME");
-#endif
 	nvlist_add_number(limits, "family", (uint64_t)AF_INET);
 	if (cap_limit_set(g_capdns, limits) != 0) {
-		LOGERR_PERROR("cap_limit_set(system.dns)");
+		LOGERR_PERROR("cap_limit_set(netdumpd.dns)");
 		goto err;
 	}
 

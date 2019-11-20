@@ -2,12 +2,13 @@
 
 PROG=	netdumpd
 SRCS=	netdumpd.c	\
+	cap_dns.c	\
 	cap_handler.c	\
 	cap_herald.c
 MAN=	netdumpd.8
 BINDIR=	/usr/sbin
 
-LDADD+=	-lcasper -lcap_dns -lnv -lutil
+LDADD+=	-lcasper -lnv -lutil
 
 CFLAGS+= -DWITH_CASPER -I${.CURDIR}
 
