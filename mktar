@@ -5,7 +5,7 @@ if [ $# -ne 0 ]; then
     exit 1
 fi
 
-vers=$(date +"%Y%m%d")
-file=netdumpd-${vers}.tar.gz
-git archive --format=tar --prefix=netdumpd-${vers}/ master | gzip > $file
+pkg=netdumpd-$(date +"%Y%m%d")
+file=${pkg}.tar.gz
+git archive --format=tar --prefix=${pkg}/ master | gzip > $file
 scp $file markj@freefall.freebsd.org:public_distfiles/
