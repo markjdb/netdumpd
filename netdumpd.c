@@ -792,13 +792,14 @@ handle_vmcore(struct netdump_client *client, struct netdump_pkt *pkt)
 }
 
 static void
-symlink_client_file(struct netdump_client *client, const char *file)
+symlink_client_file(const char *path, const char *hostname, const char *file,
+    const char *target)
 {
 	char symlinkpath[MAXPATHLEN], *symlinktarget;
 	size_t len;
 
 	len = snprintf(symlinkpath, sizeof(symlinkpath), "%s/%s.%s.last",
-	    client->path, file, client->hostname);
+	    path, file, hostname);
 	if (len >= sizeof(symlinkpath)) {
 		LOGWARN("client %s file path is too long");
 		return;
@@ -807,7 +808,7 @@ symlink_client_file(struct netdump_client *client, const char *file)
 		LOGERR_PERROR("unlinkat()");
 		return;
 	}
-	symlinktarget = strdup(client->corefilename);
+	symlinktarget = strdup(target);
 	if (symlinkat(basename(symlinktarget), g_dumpdir_fd, symlinkpath) != 0)
 		LOGERR_PERROR("symlink()");
 	free(symlinktarget);
@@ -824,8 +825,10 @@ handle_finish(struct netdump_client *client, struct netdump_pkt *pkt)
 		LOGERR_PERROR("fsync()");
 
 	/* Create symlinks to the new vmcore and info files. */
-	symlink_client_file(client, "vmcore");
-	symlink_client_file(client, "info");
+	symlink_client_file(client->path, client->hostname, "vmcore",
+	    client->corefilename);
+	symlink_client_file(client->path, client->hostname, "info",
+	    client->infofilename);
 
 	LOGINFO("Completed dump from client %s [%s]\n", client->hostname,
 	    client_ntoa(client));
