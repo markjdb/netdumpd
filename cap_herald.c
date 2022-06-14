@@ -69,11 +69,7 @@ netdump_cap_herald(cap_channel_t *cap, int *nsd, struct sockaddr_in *sin,
 
 	nvl = nvlist_create(0);
 	nvlist_add_string(nvl, "cmd", "herald");
-#if __FreeBSD_version >= 1200000
 	nvl = cap_xfer_nvlist(cap, nvl);
-#else
-	nvl = cap_xfer_nvlist(cap, nvl, 0);
-#endif
 	if (nvl == NULL)
 		return (errno);
 

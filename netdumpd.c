@@ -1053,13 +1053,11 @@ init_cap_mode(void)
 
 	error = 1;
 
-#if __FreeBSD_version >= 1200000
 	/* Needed for strerror(3). */
 	caph_cache_catpages();
 
 	/* Needed for ctime(3). */
 	caph_cache_tzdata();
-#endif
 
 	capcasper = cap_init();
 	if (capcasper == NULL) {

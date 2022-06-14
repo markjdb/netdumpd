@@ -62,11 +62,7 @@ netdump_cap_handler(cap_channel_t *cap, const char *reason, const char *ip,
 	nvlist_add_string(nvl, "hostname", hostname);
 	nvlist_add_string(nvl, "infofile", infofile);
 	nvlist_add_string(nvl, "corefile", corefile);
-#if __FreeBSD_version >= 1200000
 	nvl = cap_xfer_nvlist(cap, nvl);
-#else
-	nvl = cap_xfer_nvlist(cap, nvl, 0);
-#endif
 	if (nvl == NULL)
 		return (-1);
 
