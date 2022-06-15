@@ -1,0 +1,9 @@
+*.o
+.depend
+.depend.*
+netdumpd
+netdumpd.full
+netdumpd.debug
+netdumpd.8.gz
+
+.ccls-cache
