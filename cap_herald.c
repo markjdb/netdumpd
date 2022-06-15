@@ -26,12 +26,10 @@
 #include <sys/param.h>
 #include <sys/dnv.h>
 #include <sys/endian.h>
-#include <sys/iov.h>
 #include <sys/nv.h>
-#include <sys/dnv.h>
+#include <sys/socket.h>
 
 #include <netinet/in.h>
-#include <netinet/netdump/netdump.h>
 
 #include <err.h>
 #include <errno.h>

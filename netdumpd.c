@@ -43,7 +43,6 @@ __FBSDID("$FreeBSD$");
 #include <arpa/inet.h>
 #include <net/if.h>
 #include <netinet/in.h>
-#include <netinet/netdump/netdump.h>
 
 #include <assert.h>
 #include <capsicum_helpers.h>
@@ -85,11 +84,6 @@ __FBSDID("$FreeBSD$");
 	inet_ntoa((cl)->ip)
 #define	client_pinfo(cl, f, ...)					\
 	fprintf((cl)->infofile, (f), ## __VA_ARGS__)
-
-struct netdump_pkt {
-	struct netdump_msg_hdr hdr;
-	uint8_t		data[NETDUMP_DATASIZE];
-} __packed;
 
 #define	VMCORE_BUFSZ	(128 * 1024)
 

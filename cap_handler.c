@@ -28,8 +28,6 @@
 #include <sys/nv.h>
 #include <sys/procdesc.h>
 
-#include <netinet/netdump/netdump.h>
-
 #include <errno.h>
 #include <fcntl.h>
 #include <stdbool.h>

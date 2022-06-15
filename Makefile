@@ -10,7 +10,7 @@ BINDIR=	/usr/sbin
 
 LDADD+=	-lcasper -lnv -lutil
 
-CFLAGS+= -DWITH_CASPER -I${.CURDIR}
+CFLAGS+= -DWITH_CASPER
 
 WARNS?=	6
 

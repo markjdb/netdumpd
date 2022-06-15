@@ -26,6 +26,8 @@
 #ifndef _NETDUMPD_H_
 #define	_NETDUMPD_H_
 
+#include <sys/types.h>
+
 struct cap_channel;
 struct sockaddr_in;
 
@@ -33,6 +35,32 @@ int	netdump_cap_handler(struct cap_channel *, const char *, const char *,
 	    const char *, const char *, const char *);
 int	netdump_cap_herald(struct cap_channel *, int *, struct sockaddr_in *,
 	    uint32_t *, char **);
+
+#define	NETDUMP_DATASIZE	4096
+#define	NETDUMP_PORT		20023
+#define	NETDUMP_ACKPORT		20024
+
+struct netdump_msg_hdr {
+#define	NETDUMP_HERALD		1
+#define	NETDUMP_FINISHED	2
+#define	NETDUMP_VMCORE		3
+#define	NETDUMP_KDH		4
+#define	NETDUMP_EKCD_KEY	5
+	uint32_t	mh_type;
+	uint32_t	mh_seqno;
+	uint64_t	mh_offset;
+	uint32_t	mh_len;
+	uint32_t	mh_aux2;
+} __packed;
+
+struct netdump_ack {
+	uint32_t	na_seqno;
+} __packed;
+
+struct netdump_pkt {
+	struct netdump_msg_hdr hdr;
+	uint8_t		data[NETDUMP_DATASIZE];
+} __packed;
 
 #define	ndtoh(hdr) do {					\
 	(hdr)->mh_type = ntohl((hdr)->mh_type);		\
