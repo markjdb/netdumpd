@@ -7,3 +7,7 @@ netdumpd.debug
 netdumpd.8.gz
 
 .ccls-cache
+
+client/netdump-client
+client/netdump-client.debug
+client/netdump-client.full

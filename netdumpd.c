@@ -2,7 +2,7 @@
  * SDPX-License-Identifier: BSD-2-Clause
  *
  * Copyright (c) 2005-2011 Sandvine Incorporated. All rights reserved.
- * Copyright (c) 2016-2018 Dell EMC
+ * Copyright (c) 2016-2023 Dell EMC
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -27,12 +27,11 @@
  */
 
 #include <sys/param.h>
-#include <sys/capsicum.h>
+
 #include <sys/endian.h>
 #include <sys/errno.h>
 #include <sys/event.h>
 #include <sys/kerneldump.h>
-#include <sys/nv.h>
 #include <sys/procdesc.h>
 #include <sys/queue.h>
 #include <sys/socket.h>
@@ -44,7 +43,14 @@
 #include <netinet/in.h>
 
 #include <assert.h>
+
+#ifdef WITH_CAPSICUM
+#include <sys/capsicum.h>
+#include <sys/nv.h>
 #include <capsicum_helpers.h>
+#include "cap_dns.h"
+#endif
+
 #include <err.h>
 #include <fcntl.h>
 #include <libgen.h>
@@ -62,7 +68,6 @@
 
 #include <libutil.h>
 
-#include "cap_dns.h"
 #include "netdumpd.h"
 #include "kerneldump_compat.h"
 
@@ -108,8 +113,10 @@ struct netdump_client {
 /* Clients list. */
 static LIST_HEAD(, netdump_client) g_clients = LIST_HEAD_INITIALIZER(g_clients);
 
+#ifdef WITH_CAPSICUM
 /* Capabilities. */
 static cap_channel_t *g_capdns, *g_caphandler, *g_capherald;
+#endif
 
 /* Program arguments handlers. */
 static char g_dumpdir[MAXPATHLEN];
@@ -192,7 +199,7 @@ read_index(struct netdump_client *client, const char *dir)
 		return (-1);
 	}
 	fd = openat(g_dumpdir_fd, bounds,
-	    O_RDONLY | O_CREAT | O_CLOEXEC, 0600);
+	    O_RDONLY | O_CREAT | O_CLOEXEC | O_RESOLVE_BENEATH, 0600);
 	if (fd < 0) {
 		LOGERR("openat(%s): %s\n", bounds, strerror(errno));
 		return (-1);
@@ -244,7 +251,7 @@ write_index(struct netdump_client *client)
 		LOGERR("Truncated bounds file path: '%s'\n", bounds);
 		return (-1);
 	}
-	fd = openat(g_dumpdir_fd, bounds, O_WRONLY | O_CLOEXEC);
+	fd = openat(g_dumpdir_fd, bounds, O_WRONLY | O_CLOEXEC | O_RESOLVE_BENEATH);
 	if (fd < 0) {
 		LOGERR("openat(%s): %s\n", bounds, strerror(errno));
 		return (-1);
@@ -277,7 +284,7 @@ open_info_file(struct netdump_client *client, const char *dir, int idx)
 	}
 
 	fd = openat(g_dumpdir_fd, client->infofilename,
-	    O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+	    O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_RESOLVE_BENEATH, 0600);
 	if (fd == -1 && errno != EEXIST)
 		LOGERR("openat(\"%s\"): %s\n",
 		    client->infofilename, strerror(errno));
@@ -330,7 +337,7 @@ open_client_files(struct netdump_client *client, const char *dir)
 		return (-1);
 	}
 	fd = openat(g_dumpdir_fd, client->corefilename,
-	    O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+	    O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_RESOLVE_BENEATH, 0600);
 	if (fd == -1) {
 		error = errno;
 		/* Failed. Keep the numbers in sync. */
@@ -370,6 +377,7 @@ alloc_client(int sd, struct sockaddr_in *saddr, char *path)
 	client->last_msg = g_now;
 	client->ip = saddr->sin_addr;
 
+#ifdef WITH_CAPSICUM
 	error = cap_getnameinfo(g_capdns, (struct sockaddr *)saddr,
 	    saddr->sin_len, client->hostname, sizeof(client->hostname),
 	    NULL, 0, NI_NAMEREQD);
@@ -388,6 +396,26 @@ alloc_client(int sd, struct sockaddr_in *saddr, char *path)
 		if (firstdot)
 			*firstdot = '\0';
 	}
+#else
+	error = getnameinfo((struct sockaddr *)saddr,
+	    saddr->sin_len, client->hostname, sizeof(client->hostname),
+	    NULL, 0, NI_NAMEREQD);
+	if (error != 0) {
+		/* Can't resolve, try with a numeric IP. */
+		error = getnameinfo((struct sockaddr *)saddr,
+		    saddr->sin_len, client->hostname, sizeof(client->hostname),
+		    NULL, 0, 0);
+		if (error != 0) {
+			LOGERR("getnameinfo(): %s\n", gai_strerror(error));
+			goto error_out;
+		}
+	} else {
+		/* Strip off the domain name. */
+		firstdot = strchr(client->hostname, '.');
+		if (firstdot)
+			*firstdot = '\0';
+	}
+#endif
 
 	/* It should be enough to hold approximatively twice the chunk size. */
 	bufsz = 128 * 1024;
@@ -474,12 +502,24 @@ exec_handler(struct netdump_client *client, const char *reason)
 	struct kevent ev;
 	int pd;
 
+#ifdef WITH_CAPSICUM
 	if (g_caphandler == NULL)
 		return;
 	pd = netdump_cap_handler(g_caphandler, reason, client_ntoa(client),
 	    client->hostname, client->infofilename, client->corefilename);
 	if (pd < 0)
 		LOGERR("netdump_cap_handler(): %m");
+
+#else
+	if(g_handler_script == NULL)
+		return;
+	pd = netdump_handler(g_handler_script, reason, client_ntoa(client),
+	    client->hostname, client->infofilename, client->corefilename);
+	if (pd < 0)
+		LOGERR("netdump_handler(): %m");
+
+#endif
+
 	EV_SET(&ev, pd, EVFILT_PROCDESC, EV_ADD, NOTE_EXIT, 0, NULL);
 	if (kevent(g_kq, &ev, 1, NULL, 0, NULL) != 0) {
 		LOGERR_PERROR("kevent(procdesc)");
@@ -721,7 +761,7 @@ handle_ekcd_key(struct netdump_client *client, struct netdump_pkt *pkt)
 		}
 
 		fd = openat(g_dumpdir_fd, keyfile,
-		    O_WRONLY | O_CREAT | O_CLOEXEC, 0400);
+		    O_WRONLY | O_CREAT | O_CLOEXEC | O_RESOLVE_BENEATH, 0400);
 		if (fd < 0) {
 			LOGERR_PERROR("openat()");
 			return;
@@ -841,12 +881,21 @@ server_event(void)
 	uint32_t seqno;
 	int error, sd;
 
+#ifdef WITH_CAPSICUM
 	error = netdump_cap_herald(g_capherald, &sd, &saddr, &seqno, &path);
 	if (error != 0) {
 		LOGERR("netdump_cap_herald(): %s\n", strerror(error));
 		return;
 	}
 
+#else
+	error = netdump_herald(g_sock, &sd, &saddr, &seqno, &path);
+	if (error != 0) {
+		LOGERR("netdump_herald(): %s\n", strerror(error));
+		return;
+	}
+
+#endif
 	LIST_FOREACH(client, &g_clients, iter) {
 		if (client->ip.s_addr == saddr.sin_addr.s_addr)
 			break;
@@ -1023,6 +1072,7 @@ get_script_option(void)
 	return (script);
 }
 
+#ifdef WITH_CAPSICUM
 /*
  * Enter capability mode.  This effectively sandboxes netdumpd by restricting
  * its ability to acquire new rights.  In particular, capability mode enforces
@@ -1116,6 +1166,7 @@ err:
 	cap_close(capcasper);
 	return (error);
 }
+#endif
 
 static int
 init_kqueue(void)
@@ -1181,6 +1232,7 @@ init_server_socket(void)
 	bindaddr.sin_family = AF_INET;
 	bindaddr.sin_addr.s_addr = g_bindip.s_addr;
 	bindaddr.sin_port = htons(NETDUMP_PORT);
+
 	if (bind(g_sock, (struct sockaddr *)&bindaddr, sizeof(bindaddr))) {
 		LOGERR_PERROR("bind()");
 		return (1);
@@ -1303,9 +1355,13 @@ main(int argc, char **argv)
 		goto cleanup;
 	if (init_kqueue())
 		goto cleanup;
+
+#ifdef WITH_CAPSICUM
 	if (init_cap_mode())
 		goto cleanup;
+#endif
 
+	// Loop here until service is stopped
 	exit_code = eventloop();
 
 cleanup:
@@ -1315,9 +1371,11 @@ cleanup:
 	free(g_handler_script);
 	if (g_sock != -1)
 		close(g_sock);
+#ifdef WITH_CAPSICUM
 	if (g_capherald != NULL)
 		cap_close(g_capherald);
 	if (g_capdns != NULL)
 		cap_close(g_capdns);
+#endif
 	return (exit_code);
 }
