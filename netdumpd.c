@@ -1,4 +1,6 @@
 /*-
+ * SDPX-License-Identifier: BSD-2-Clause
+ *
  * Copyright (c) 2005-2011 Sandvine Incorporated. All rights reserved.
  * Copyright (c) 2016-2018 Dell EMC
  *

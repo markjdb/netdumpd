@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause
+ *
  * Copyright (c) 2017 Dell EMC
  *
  * Redistribution and use in source and binary forms, with or without
