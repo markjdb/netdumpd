@@ -1,5 +1,3 @@
-# $FreeBSD$
-
 PROG=	netdumpd
 SRCS=	netdumpd.c	\
 	cap_dns.c	\

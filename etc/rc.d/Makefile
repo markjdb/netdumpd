@@ -1,5 +1,3 @@
-# $FreeBSD$
-
 BINDIR=		/etc/rc.d
 
 SCRIPTS+=	netdumpd
