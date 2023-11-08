@@ -31,6 +31,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/netdump/netdump.h>
+#include <net/debugnet.h>
 
 #include <err.h>
 #include <fcntl.h>

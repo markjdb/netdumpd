@@ -33,10 +33,18 @@
 struct cap_channel;
 struct sockaddr_in;
 
+#ifdef WITH_CAPSICUM
 int	netdump_cap_handler(struct cap_channel *, const char *, const char *,
 	    const char *, const char *, const char *);
 int	netdump_cap_herald(struct cap_channel *, int *, struct sockaddr_in *,
 	    uint32_t *, char **);
+
+#else
+int netdump_handler(const char *, const char *, const char *,
+        const char *, const char *, const char *);
+int netdump_herald(int g_sock, int *, struct sockaddr_in *,
+        uint32_t *, char **);
+#endif
 
 #define	NETDUMP_DATASIZE	4096
 #define	NETDUMP_PORT		20023
